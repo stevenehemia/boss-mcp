@@ -1,0 +1,23 @@
+cd /home/steve/Core/boss-mcp/test
+
+// use a pair of pipes (FIFOs) so the process is not attached to a TTY
+mkfifo mcp_in mcp_out
+../build/boss_mcp < mcp_in > mcp_out
+
+// initialize
+payload='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}'
+
+// initialized (notification)
+payload='{"jsonrpc":"2.0","method":"initialized"}'
+
+// tools/list
+payload='{"jsonrpc":"2.0","id":2,"method":"tools/list"}'
+
+// tools/call
+payload='{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"boss.evaluate","arguments":{"expression":{"type":"call","head":"Plus","args":[{"type":"long","value":1},{"type":"long","value":2}]}}}}'
+
+printf "Content-Length: %s\r\n\r\n%s" "${#payload}" "$payload" > mcp_in
+
+cat mcp_out
+
+rm -f mcp_in mcp_out

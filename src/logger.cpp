@@ -42,7 +42,7 @@ void logMessage(LoggerState& state, LogLevel level, const std::string& text) {
     }
   }
 
-  json notification;
+  nlohmann::json notification;
   notification["jsonrpc"] = "2.0";
   notification["method"] = "notifications/message";
   notification["params"] = {{"level", levelName}, {"data", text}};

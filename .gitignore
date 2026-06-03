@@ -20,3 +20,9 @@ Makefile
 
 # Backup files
 backup/
+
+# Data files
+data/
+
+# AI assist
+CLAUDE.md

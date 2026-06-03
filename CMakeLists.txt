@@ -17,7 +17,8 @@ target_include_directories(boss_mcp PRIVATE
 	../Source
 )
 
-set(BOSS_SHARED_LIB "${CMAKE_CURRENT_LIST_DIR}/../build/deps/lib/libBOSS.so")
+
+set(BOSS_SHARED_LIB "${CMAKE_CURRENT_LIST_DIR}/../Build/libBOSS.so")
 if(NOT EXISTS ${BOSS_SHARED_LIB})
 	message(FATAL_ERROR "Missing shared library: ${BOSS_SHARED_LIB}")
 endif()
@@ -25,8 +26,8 @@ target_link_libraries(boss_mcp PRIVATE ${BOSS_SHARED_LIB})
 
 if(UNIX AND NOT APPLE)
 	set_target_properties(boss_mcp PROPERTIES
-		BUILD_RPATH "$ORIGIN/../build/deps/lib"
-		INSTALL_RPATH "$ORIGIN/../build/deps/lib"
+		BUILD_RPATH "$ORIGIN/../../Build/deps/lib;$ORIGIN/../../Build/engines/lib"
+		INSTALL_RPATH "$ORIGIN/../../Build/deps/lib;$ORIGIN/../../Build/engines/lib"
 	)
 endif()
 

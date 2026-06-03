@@ -1,11 +1,23 @@
-#include <fstream>
 #include <iostream>
-#include <sstream>
+#include "expression.h"
 #include "logger.h"
 #include "transport.h"
 #include "handlers.h"
 
-int main() {
+using json = nlohmann::json;
+
+int main(int argc, char* argv[]) {
+  Format format = Format::ExpressionJSON;
+  for(int i = 1; i < argc; ++i) {
+    const std::string arg = argv[i];
+    if(arg == "--format=regular") { format = Format::Regular; }
+    else if(arg == "--format=expressionjson") { format = Format::ExpressionJSON; }
+    else {
+      std::cerr << "Unknown argument: " << arg << std::endl;
+      return 1;
+    }
+  }
+
   LoggerState logger;
   bool shuttingDown = false;
 
@@ -21,13 +33,9 @@ int main() {
       continue;
     }
 
-    HandlerResult result = handleRequest(request, logger);
-    if(result.shouldExit) {
-      break;
-    }
-    if(result.shouldShutDown) {
-      shuttingDown = true;
-    }
+    HandlerResult result = handleRequest(request, logger, format);
+    if(result.shouldExit) { break; }
+    if(result.shouldShutDown) { shuttingDown = true; }
   }
 
   return 0;

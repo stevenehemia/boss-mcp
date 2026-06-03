@@ -2,13 +2,20 @@
 #include <string>
 #include <iostream>
 #include <cctype>
-#include <fstream>
 #include "transport.h"
 #include "nlohmann/json.hpp"
 
 using json = nlohmann::json;
 
 static bool isFramed = true;
+
+namespace {
+std::string buildFrame(const json& message) {
+  const std::string payload = message.dump();
+  if(!isFramed) { return payload + "\n"; }
+  return "Content-Length: " + std::to_string(payload.size()) + "\r\n\r\n" + payload;
+}
+} // namespace
 
 std::string toLower(std::string value) {
   for(char& c : value) {
@@ -86,12 +93,6 @@ json makeResult(const json& id, const json& result) {
   response["id"] = id;
   response["result"] = result;
   return response;
-}
-
-std::string buildFrame(const json& message) {
-  const std::string payload = message.dump();
-  if(!isFramed) { return payload + "\n"; }
-  return "Content-Length: " + std::to_string(payload.size()) + "\r\n\r\n" + payload;
 }
 
 void sendResponse(const json& message) {

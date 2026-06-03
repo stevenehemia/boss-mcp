@@ -1,4 +1,5 @@
 #pragma once
+#include "expression.h"
 #include "logger.h"
 #include "nlohmann/json.hpp"
 
@@ -7,6 +8,4 @@ struct HandlerResult {
   bool shouldShutDown = false;
 };
 
-HandlerResult handleRequest(const nlohmann::json& request, LoggerState& logger);
-nlohmann::json buildToolsList();
-nlohmann::json handleToolsCall(const nlohmann::json& params, LoggerState& logger);
+HandlerResult handleRequest(const nlohmann::json& request, LoggerState& logger, Format format);

@@ -11,37 +11,18 @@ constexpr const char* serverVersion = "0.1.0";
 
 namespace {
 
+json toolResponse(const std::string& text, bool isError) {
+  return {{"content", json::array({{{"type", "text"}, {"text", text}}})}, {"isError", isError}};
+}
+
 json buildToolsList(Format format) {
-  constexpr const char* toolDescription =
-    "Evaluate a BOSS expression. BOSS is a relational query engine for tabular data. "
-
-    "DATA SOURCES: "
-    "Load a CSV file with [\"Load\", [\"String\", \"/absolute/path/to/file.csv\"]] — always use absolute paths. "
-    "Build an in-memory table with [\"Table\", [\"ColName\", val1, val2, ...]]. "
-
-    "CORE OPERATIONS: "
-    "Filter(table, predicate) — row filtering. "
-    "Project(table, col1, col2, ...) — column selection; wrap a column in a type cast e.g. [\"Int\", [\"Symbol\", \"col\"]] to convert its type. "
-    "OrderBy(table, [\"keys\", col1, col2]) — sort rows. "
-    "Materialize(expr) — force evaluation of a lazy expression. "
-
-    "AGGREGATION: "
-    "GroupBy(table, aggregate, [\"keys\", groupCol]) — group and aggregate; e.g. [\"max\", [\"Symbol\", \"col\"]]. "
-    "Cumulate(table, aggregate) — running/cumulative aggregation over a column. "
-    "Pairwise(table, [\"Symbol\", \"outputCol\"], aggregate, [\"Integer\", windowSize]) — rolling window aggregation. "
-
-    "JOINS: "
-    "Join(left, right, [\"keys\", joinCol]) — joins on a shared key column; appends _l/_r suffixes to disambiguate columns. "
-
-    "NAMED RESULTS (multi-step queries): "
-    "Name(expr, [\"Symbol\", \"label\"]) — assigns a name to a result so it can be referenced later. "
-    "ByName([\"Symbol\", \"label\"]) — retrieves a previously named result. "
-
-    "PREDICATES (use inside Filter): Greater, Less, Equal, And. "
-
-    "COLUMN REFERENCES: [\"Symbol\", \"colname\"]. "
-
-    "NOT SUPPORTED (returns expression unevaluated): Plus, Times, Map/Lambda.";
+  constexpr const char* evaluateDescription =
+    "Evaluate a BOSS expression. Call boss_describe first to get the complete operator reference. "
+    "Load CSV: [\"Load\", [\"String\", \"/absolute/path/to/file.csv\"]] — always use absolute paths. "
+    "In-memory table: [\"Table\", [\"ColName\", val1, val2, ...]]. "
+    "Column reference: [\"Symbol\", \"colname\"]. "
+    "Type cast: [\"Int\", [\"Symbol\", \"col\"]]. "
+    "Multi-step queries: Name(table, [\"Symbol\", \"label\"]) stores a result; ByName([\"Symbol\", \"label\"]) retrieves it.";
 
   const std::string expressionDescription = format == Format::ExpressionJSON
     ? R"(ExpressionJSON array format. )"
@@ -54,75 +35,109 @@ json buildToolsList(Format format) {
 
   const char* expressionType = format == Format::ExpressionJSON ? "array" : "object";
 
-  json tool;
-  tool["name"] = "boss_evaluate";
-  tool["description"] = toolDescription;
-  tool["inputSchema"] = {
+  json evaluateTool;
+  evaluateTool["name"] = "boss_evaluate";
+  evaluateTool["description"] = evaluateDescription;
+  evaluateTool["inputSchema"] = {
       {"type", "object"},
       {"properties", {{"expression", {{"type", expressionType}, {"description", expressionDescription}}}}},
       {"required", json::array({"expression"})}};
 
-  return json::array({tool});
+  json describeTool;
+  describeTool["name"] = "boss_describe";
+  describeTool["description"] =
+    "Returns the complete BOSS operator reference directly from the engine. "
+    "Call this before boss_evaluate to discover all available operations and their exact syntax.";
+  describeTool["inputSchema"] = {{"type", "object"}, {"properties", json::object()}};
+
+  return json::array({evaluateTool, describeTool});
 }
 
-json handleToolsCall(const json& params, LoggerState& logger, Format format) {
+json handleDescribeCall(const LogLevel& logLevel) {
+  BOSSSymbol* sym = symbolNameToNewBOSSSymbol("GetEngineDescription");
+  BOSSExpression* expr = newComplexBOSSExpression(sym, 0, nullptr);
+  freeBOSSSymbol(sym);
+
+  BOSSExpression* result = nullptr;
+  std::string description;
+  try {
+    result = BOSSEvaluate(expr);
+    char* raw = getNewStringValueFromBOSSExpression(result);
+    if(raw) { description = raw; freeBOSSString(raw); }
+    freeBOSSExpression(result);
+  } catch(...) {
+    if(result) freeBOSSExpression(result);
+    return toolResponse("GetEngineDescription failed", true);
+  }
+
+  if(description.empty()) {
+    return toolResponse("engine description unavailable", true);
+  }
+
+  logMessage(logLevel, LogLevel::kDebug, "boss_describe called");
+  return toolResponse(description, false);
+}
+
+json handleToolsCall(const json& params, const LogLevel& logLevel, Format format) {
   if(!params.contains("name") || !params["name"].is_string()) {
-    return {{"content", json::array({{{"type", "text"}, {"text", "missing tool name"}}})},
-            {"isError", true}};
+    return toolResponse("missing tool name", true);
   }
 
   const std::string name = params["name"].get<std::string>();
+  if(name == "boss_describe") {
+    return handleDescribeCall(logLevel);
+  }
   if(name != "boss_evaluate") {
-    return {{"content", json::array({{{"type", "text"}, {"text", "unknown tool"}}})},
-            {"isError", true}};
+    return toolResponse("unknown tool", true);
   }
 
   if(!params.contains("arguments") || !params["arguments"].is_object()) {
-    return {{"content", json::array({{{"type", "text"}, {"text", "missing arguments"}}})},
-            {"isError", true}};
+    return toolResponse("missing arguments", true);
   }
 
   const json& arguments = params["arguments"];
   if(!arguments.contains("expression")) {
-    return {{"content", json::array({{{"type", "text"}, {"text", "missing expression"}}})},
-            {"isError", true}};
+    return toolResponse("missing expression", true);
   }
 
   std::string error;
   BOSSExpression* expression = parseExpression(arguments["expression"], format, error);
   if(expression == nullptr) {
-    return {{"content", json::array({{{"type", "text"}, {"text", error}}})},
-            {"isError", true}};
+    return toolResponse(error, true);
   }
 
-  BOSSExpression* result = BOSSEvaluate(expression);
-  json resultJson = expressionToJson(result, format);
-  freeBOSSExpression(result);
+  BOSSExpression* result = nullptr;
+  json resultJson;
+  try {
+    result = BOSSEvaluate(expression);
+    resultJson = expressionToJson(result, format);
+    freeBOSSExpression(result);
+  } catch(const std::exception& e) {
+    if(result) freeBOSSExpression(result);
+    return toolResponse(std::string("BOSS evaluation error: ") + e.what(), true);
+  } catch(...) {
+    if(result) freeBOSSExpression(result);
+    return toolResponse("BOSS evaluation error: unknown exception", true);
+  }
 
-  logMessage(logger, LogLevel::kDebug, "Evaluated expression using boss_evaluate");
-
-  return {{"content", json::array({{{"type", "text"}, {"text", resultJson.dump()}}})},
-          {"isError", false}};
+  logMessage(logLevel, LogLevel::kDebug, "Evaluated expression using boss_evaluate");
+  return toolResponse(resultJson.dump(), false);
 }
 
 } // namespace
 
-HandlerResult handleRequest(const json& request, LoggerState& logger, Format format) {
+bool handleRequest(const json& request, LogLevel& logLevel, Format format) {
   const std::string method = request.value("method", "");
 
-  if(method == "initialized" || method == "notifications/initialized") {
-    logger.clientInitialized = true;
-    return {};
-  }
+  if(method == "initialized" || method == "notifications/initialized") { return false; }
+  if(method == "exit") { return true; }
 
-  if(method == "exit") { return {.shouldExit = true}; }
-
-  if(!request.contains("id")) { return {}; }
+  if(!request.contains("id")) { return false; }
   const json id = request["id"];
 
   if(method == "shutdown") {
     sendResponse(makeResult(id, nullptr));
-    return {.shouldShutDown = true};
+    return true;
   }
 
   if(method == "initialize") {
@@ -140,34 +155,32 @@ HandlerResult handleRequest(const json& request, LoggerState& logger, Format for
       {"tools",   {{"listChanged", false}}},
       {"logging", json::object()}
     };
-    logMessage(logger, LogLevel::kInfo,
-               std::string("Initialize response: ") + makeResult(id, result).dump());
     sendResponse(makeResult(id, result));
-    return {};
+    return false;
   }
 
   if(method == "logging/setLevel") {
     if(request.contains("params") && request["params"].is_object()) {
-      logger.level = parseLogLevel(request["params"].value("level", "info"));
+      logLevel = parseLogLevel(request["params"].value("level", "info"));
     }
     sendResponse(makeResult(id, json::object()));
-    return {};
+    return false;
   }
 
   if(method == "tools/list") {
     sendResponse(makeResult(id, {{"tools", buildToolsList(format)}}));
-    return {};
+    return false;
   }
 
   if(method == "tools/call") {
     if(!request.contains("params") || !request["params"].is_object()) {
       sendResponse(makeError(-32602, "Missing params", id));
-      return {};
+      return false;
     }
-    sendResponse(makeResult(id, handleToolsCall(request["params"], logger, format)));
-    return {};
+    sendResponse(makeResult(id, handleToolsCall(request["params"], logLevel, format)));
+    return false;
   }
 
   sendResponse(makeError(-32601, "Method not found", id));
-  return {};
+  return false;
 }

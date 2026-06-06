@@ -3,9 +3,4 @@
 #include "logger.h"
 #include "nlohmann/json.hpp"
 
-struct HandlerResult {
-  bool shouldExit     = false;
-  bool shouldShutDown = false;
-};
-
-HandlerResult handleRequest(const nlohmann::json& request, LoggerState& logger, Format format);
+bool handleRequest(const nlohmann::json& request, LogLevel& logLevel, Format format);

@@ -18,10 +18,9 @@ int main(int argc, char* argv[]) {
     }
   }
 
-  LoggerState logger;
-  bool shuttingDown = false;
+  LogLevel logLevel = LogLevel::kInfo;
 
-  while(!shuttingDown) {
+  while(true) {
     auto rawMessage = readMessage(std::cin);
     if(!rawMessage.has_value()) { break; }
 
@@ -33,9 +32,7 @@ int main(int argc, char* argv[]) {
       continue;
     }
 
-    HandlerResult result = handleRequest(request, logger, format);
-    if(result.shouldExit) { break; }
-    if(result.shouldShutDown) { shuttingDown = true; }
+    if(handleRequest(request, logLevel, format)) { break; }
   }
 
   return 0;

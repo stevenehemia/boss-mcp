@@ -1,50 +1,42 @@
-#include <cctype>
 #include <iostream>
-#include <map>
 #include <string>
 #include "logger.h"
 #include "transport.h"
 #include "nlohmann/json.hpp"
 
-const std::map<std::string, LogLevel> kLevelByName = {
-    {"debug", LogLevel::kDebug},
-    {"info", LogLevel::kInfo},
-    {"warn", LogLevel::kWarn},
-    {"warning", LogLevel::kWarn},
-    {"error", LogLevel::kError},
-    {"silent", LogLevel::kSilent},
-    {"none", LogLevel::kSilent},
-};
-
-const std::string kDefaultLevelName = "info";
-
-LogLevel parseLogLevel(const std::string& value) {
-  std::string lowered = toLower(value);
-  auto it = kLevelByName.find(lowered);
-  if(it != kLevelByName.end()) { return it->second; }
-  return LogLevel::kInfo;
-}
+namespace {
 
 bool shouldLog(LogLevel current, LogLevel message) {
   if(current == LogLevel::kSilent) { return false; }
   return static_cast<int>(message) >= static_cast<int>(current);
 }
 
-void logMessage(LoggerState& state, LogLevel level, const std::string& text) {
-  if(!shouldLog(state.level, level) || !state.clientInitialized) { return; }
-  std::cerr << text << std::endl;
-
-  std::string levelName = kDefaultLevelName;
-  for(const auto& entry : kLevelByName) {
-    if(entry.second == level) {
-      levelName = entry.first;
-      break;
-    }
+const char* levelToName(LogLevel level) {
+  switch(level) {
+    case LogLevel::kDebug: return "debug";
+    case LogLevel::kWarn: return "warn";
+    case LogLevel::kError: return "error";
+    default: return "info";
   }
+}
+} // namespace
+
+LogLevel parseLogLevel(const std::string& value) {
+  const std::string lowered = toLower(value);
+  if(lowered == "debug") { return LogLevel::kDebug; }
+  if(lowered == "warn" || lowered == "warning") { return LogLevel::kWarn; }
+  if(lowered == "error") { return LogLevel::kError; }
+  if(lowered == "silent" || lowered == "none") { return LogLevel::kSilent; }
+  return LogLevel::kInfo;
+}
+
+void logMessage(const LogLevel& logLevel, LogLevel messageLevel, const std::string& text) {
+  if(!shouldLog(logLevel, messageLevel)) { return; }
+  std::cerr << text << std::endl;
 
   nlohmann::json notification;
   notification["jsonrpc"] = "2.0";
   notification["method"] = "notifications/message";
-  notification["params"] = {{"level", levelName}, {"data", text}};
+  notification["params"] = {{"level", levelToName(messageLevel)}, {"data", text}};
   sendResponse(notification);
 }

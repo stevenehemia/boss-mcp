@@ -1,8 +1,13 @@
+#include <ctime>
 #include <limits>
+#include <string>
 #include <vector>
 #include "expression.h"
+#include "transport.h"
 #include "BOSS.h"
 #include "nlohmann/json.hpp"
+
+extern "C" char const* bossSymbolToNewString(struct BOSSSymbol const* arg);
 
 using json = nlohmann::json;
 
@@ -12,6 +17,27 @@ namespace TypeID {
 }
 
 namespace {
+
+// Arrow date32 stores days since 1970-01-01 as int32_t.
+// Convert to "YYYY-MM-DD".
+std::string epochDayToIso(int32_t days) {
+  time_t t = static_cast<time_t>(days) * 86400;
+  struct tm tm_buf = {};
+  gmtime_r(&t, &tm_buf);
+  char buf[11];
+  strftime(buf, sizeof(buf), "%Y-%m-%d", &tm_buf);
+  return buf;
+}
+
+// Columns whose name is "date", ends with "_date", or starts with "date_"
+// (case-insensitive) are treated as date32 columns and their int32 values
+// are converted back to ISO strings on output.
+bool isDateColumnName(const std::string& name) {
+  std::string lower = toLower(name);
+  return lower == "date"
+      || (lower.size() > 5 && lower.substr(lower.size() - 5) == "_date")
+      || (lower.size() > 5 && lower.substr(0, 5) == "date_");
+}
 
 void freeArgs(std::vector<BOSSExpression*>& args) {
   for(BOSSExpression* e : args) {
@@ -232,53 +258,53 @@ BOSSExpression* parseExpression(const json& value, Format format, std::string& e
 json expressionToJson(const BOSSExpression* expression, Format format) {
   const int typeID = getBOSSExpressionTypeID(expression);
 
+  if(typeID == TypeID::Complex) {
+    std::string head = getHeadName(expression);
+    bool dateCol = isDateColumnName(head);
+    size_t count = getArgumentCountFromBOSSExpression(expression);
+    BOSSExpression** args = getArgumentsFromBOSSExpression(expression);
+    json children = json::array();
+    for(size_t i = 0; i < count; ++i) {
+      if(dateCol && getBOSSExpressionTypeID(args[i]) == TypeID::Int) {
+        std::string iso = epochDayToIso(getIntValueFromBOSSExpression(args[i]));
+        children.push_back(format == Format::ExpressionJSON
+          ? json::array({"String", iso})
+          : json{{"type", "string"}, {"value", iso}});
+      } else {
+        children.push_back(expressionToJson(args[i], format));
+      }
+    }
+    freeBOSSArguments(args);
+    if(format == Format::ExpressionJSON) {
+      children.insert(children.begin(), head);
+      return children;
+    }
+    return {{"type", "call"}, {"head", head}, {"args", children}};
+  }
+
   if(format == Format::ExpressionJSON) {
     switch(typeID) {
-      case TypeID::Bool:    return json::array({"Boolean", getBoolValueFromBOSSExpression(expression)});
-      case TypeID::Char:
-      case TypeID::Int:
-      case TypeID::Long:    return json::array({"Integer", getLongValueFromBOSSExpression(expression)});
+      case TypeID::Bool: return json::array({"Boolean", getBoolValueFromBOSSExpression(expression)});
+      case TypeID::Char: return json::array({"Integer", static_cast<int64_t>(getCharValueFromBOSSExpression(expression))});
+      case TypeID::Int: return json::array({"Integer", static_cast<int64_t>(getIntValueFromBOSSExpression(expression))});
+      case TypeID::Long: return json::array({"Integer", getLongValueFromBOSSExpression(expression)});
       case TypeID::Float:
-      case TypeID::Double:  return json::array({"Real",    getDoubleValueFromBOSSExpression(expression)});
-      case TypeID::String:  return json::array({"String",  getStringValue(expression)});
-      case TypeID::Symbol:  return json::array({"Symbol",  getSymbolValue(expression)});
-      case TypeID::Complex: {
-        json output = json::array({getHeadName(expression)});
-        size_t count = getArgumentCountFromBOSSExpression(expression);
-        BOSSExpression** args = getArgumentsFromBOSSExpression(expression);
-        for(size_t i = 0; i < count; ++i) {
-          output.push_back(expressionToJson(args[i], format));
-        }
-        freeBOSSArguments(args);
-        return output;
-      }
+      case TypeID::Double: return json::array({"Real",    getDoubleValueFromBOSSExpression(expression)});
+      case TypeID::String: return json::array({"String",  getStringValue(expression)});
+      case TypeID::Symbol: return json::array({"Symbol",  getSymbolValue(expression)});
       default: return json::array({"Unknown", nullptr});
     }
   }
 
-  // Regular JSON
   switch(typeID) {
-    case TypeID::Bool:    return {{"type", "bool"},   {"value", getBoolValueFromBOSSExpression(expression)}};
-    case TypeID::Char:    return {{"type", "char"},   {"value", getCharValueFromBOSSExpression(expression)}};
-    case TypeID::Int:     return {{"type", "int"},    {"value", getIntValueFromBOSSExpression(expression)}};
-    case TypeID::Long:    return {{"type", "long"},   {"value", getLongValueFromBOSSExpression(expression)}};
-    case TypeID::Float:   return {{"type", "float"},  {"value", getFloatValueFromBOSSExpression(expression)}};
-    case TypeID::Double:  return {{"type", "double"}, {"value", getDoubleValueFromBOSSExpression(expression)}};
-    case TypeID::String:  return {{"type", "string"}, {"value", getStringValue(expression)}};
-    case TypeID::Symbol:  return {{"type", "symbol"}, {"value", getSymbolValue(expression)}};
-    case TypeID::Complex: {
-      json result;
-      result["type"] = "call";
-      result["head"] = getHeadName(expression);
-      size_t count = getArgumentCountFromBOSSExpression(expression);
-      BOSSExpression** args = getArgumentsFromBOSSExpression(expression);
-      result["args"] = json::array();
-      for(size_t i = 0; i < count; ++i) {
-        result["args"].push_back(expressionToJson(args[i], format));
-      }
-      freeBOSSArguments(args);
-      return result;
-    }
+    case TypeID::Bool: return {{"type", "bool"}, {"value", getBoolValueFromBOSSExpression(expression)}};
+    case TypeID::Char: return {{"type", "char"}, {"value", getCharValueFromBOSSExpression(expression)}};
+    case TypeID::Int: return {{"type", "int"}, {"value", getIntValueFromBOSSExpression(expression)}};
+    case TypeID::Long: return {{"type", "long"}, {"value", getLongValueFromBOSSExpression(expression)}};
+    case TypeID::Float: return {{"type", "float"}, {"value", getFloatValueFromBOSSExpression(expression)}};
+    case TypeID::Double: return {{"type", "double"}, {"value", getDoubleValueFromBOSSExpression(expression)}};
+    case TypeID::String: return {{"type", "string"}, {"value", getStringValue(expression)}};
+    case TypeID::Symbol: return {{"type", "symbol"}, {"value", getSymbolValue(expression)}};
     default: return {{"type", "unknown"}, {"value", nullptr}};
   }
 }

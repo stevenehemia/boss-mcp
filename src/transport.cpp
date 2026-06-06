@@ -62,8 +62,10 @@ std::optional<std::string> readMessage(std::istream& input) {
     std::string header = toLower(trim(line.substr(0, colon)));
     std::string value = trim(line.substr(colon + 1));
     if(header == "content-length") {
-      contentLength = static_cast<size_t>(std::stoul(value));
-      sawLength = true;
+      try {
+        contentLength = static_cast<size_t>(std::stoul(value));
+        sawLength = true;
+      } catch(const std::exception&) {}
     }
   }
 
@@ -80,19 +82,11 @@ std::optional<std::string> readMessage(std::istream& input) {
 }
 
 json makeError(int code, const std::string& message, const json& id) {
-  json response;
-  response["jsonrpc"] = "2.0";
-  response["id"] = id;
-  response["error"] = {{"code", code}, {"message", message}};
-  return response;
+  return {{"jsonrpc", "2.0"}, {"id", id}, {"error", {{"code", code}, {"message", message}}}};
 }
 
 json makeResult(const json& id, const json& result) {
-  json response;
-  response["jsonrpc"] = "2.0";
-  response["id"] = id;
-  response["result"] = result;
-  return response;
+  return {{"jsonrpc", "2.0"}, {"id", id}, {"result", result}};
 }
 
 void sendResponse(const json& message) {

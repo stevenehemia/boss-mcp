@@ -1,7 +1,5 @@
 #pragma once
 #include <string>
-#include "nlohmann/json.hpp"
-#include "transport.h"
 
 /**
  * MCP defined log levels by severity:
@@ -12,11 +10,5 @@
  */
 enum class LogLevel { kDebug, kInfo, kWarn, kError, kSilent };
 
-struct LoggerState {
-  LogLevel level = LogLevel::kInfo;
-  bool clientInitialized = false;
-};
-
 LogLevel parseLogLevel(const std::string& value);
-bool shouldLog(LogLevel currentLevel, LogLevel messageLevel);
-void logMessage(LoggerState& state, LogLevel level, const std::string& text);
+void logMessage(const LogLevel& logLevel, LogLevel messageLevel, const std::string& text);

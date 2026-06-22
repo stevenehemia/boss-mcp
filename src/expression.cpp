@@ -23,9 +23,11 @@ namespace {
 std::string epochDayToIso(int32_t days) {
   time_t t = static_cast<time_t>(days) * 86400;
   struct tm tm_buf = {};
-  gmtime_r(&t, &tm_buf);
-  char buf[11];
-  strftime(buf, sizeof(buf), "%Y-%m-%d", &tm_buf);
+  // gmtime_r fails on out-of-range values; strftime returns 0 if buf is too
+  // small (years past 9999). Bail to "" rather than read an unterminated buf.
+  if(gmtime_r(&t, &tm_buf) == nullptr) { return ""; }
+  char buf[32];
+  if(strftime(buf, sizeof(buf), "%Y-%m-%d", &tm_buf) == 0) { return ""; }
   return buf;
 }
 
@@ -39,75 +41,68 @@ bool isDateColumnName(const std::string& name) {
       || (lower.size() > 5 && lower.substr(0, 5) == "date_");
 }
 
-void freeArgs(std::vector<BOSSExpression*>& args) {
-  for(BOSSExpression* e : args) {
-    freeBOSSExpression(e);
-  }
-}
-
-BOSSExpression* buildComplex(const std::string& headName, std::vector<BOSSExpression*>& args) {
-  BOSSSymbol* head = symbolNameToNewBOSSSymbol(headName.c_str());
-  BOSSExpression* result = newComplexBOSSExpression(head, args.size(), args.data());
-  freeBOSSSymbol(head);
-  freeArgs(args);
-  return result;
+ExprPtr buildComplex(const std::string& headName, std::vector<ExprPtr>& args) {
+  SymbolPtr head(symbolNameToNewBOSSSymbol(headName.c_str()));
+  std::vector<BOSSExpression*> raw;
+  raw.reserve(args.size());
+  for(const ExprPtr& arg : args) { raw.push_back(arg.get()); }
+  // newComplexBOSSExpression copies its inputs; head and args free on return.
+  return ExprPtr(newComplexBOSSExpression(head.get(), raw.size(), raw.data()));
 }
 
 std::string getStringValue(const BOSSExpression* expr) {
-  char* raw = getNewStringValueFromBOSSExpression(expr);
-  std::string s = raw ? raw : "";
-  freeBOSSString(raw);
-  return s;
+  return toString(getNewStringValueFromBOSSExpression(expr));
 }
 
 std::string getSymbolValue(const BOSSExpression* expr) {
-  // freeBOSSString takes char* but the API returns const char* — cast required
-  const char* raw = getNewSymbolNameFromBOSSExpression(expr);
-  std::string s = raw ? raw : "";
-  freeBOSSString(const_cast<char*>(raw));
-  return s;
+  // The API returns const char* but freeBOSSString takes char* — cast required.
+  return toString(const_cast<char*>(getNewSymbolNameFromBOSSExpression(expr)));
 }
 
 std::string getHeadName(const BOSSExpression* expr) {
-  BOSSSymbol* head = getHeadFromBOSSExpression(expr);
-  // freeBOSSString takes char* but the API returns const char* — cast required
-  const char* raw = bossSymbolToNewString(head);
-  std::string s = raw ? raw : "";
-  freeBOSSSymbol(head);
-  freeBOSSString(const_cast<char*>(raw));
-  return s;
+  SymbolPtr head(getHeadFromBOSSExpression(expr));
+  // The API returns const char* but freeBOSSString takes char* — cast required.
+  return toString(const_cast<char*>(bossSymbolToNewString(head.get())));
+}
+
+// True if raw fits in the integer type T.
+template<typename T>
+bool inRange(long long raw) {
+  return raw >= std::numeric_limits<T>::min() && raw <= std::numeric_limits<T>::max();
 }
 
 // --- ExpressionJSON (Wolfram array format) ---
 
 // Returns nullptr with empty error if type is not a known atom — caller falls through to complex.
 // Returns nullptr with non-empty error on a type mismatch.
-BOSSExpression* parseAtom(const std::string& type, const json& val, std::string& error) {
+ExprPtr parseAtom(const std::string& type, const json& val, std::string& error) {
   if(type == "Boolean") {
-    if(!val.is_boolean()) {
-      error = "Boolean requires a boolean value";
-      return nullptr;
-    }
-    return boolToNewBOSSExpression(val.get<bool>());
+    if(!val.is_boolean()) { error = "Boolean requires a boolean value"; return nullptr; }
+    return ExprPtr(boolToNewBOSSExpression(val.get<bool>()));
+  }
+  if(type == "Int") {
+    if(!val.is_number_integer()) { error = "Int requires an integer value"; return nullptr; }
+    const long long raw = val.get<long long>();
+    if(!inRange<int32_t>(raw)) { error = "Int value out of int32 range"; return nullptr; }
+    return ExprPtr(intToNewBOSSExpression(static_cast<int32_t>(raw)));
   }
   if(type == "Integer") {
-    if(val.is_number_integer()) { return longToNewBOSSExpression(val.get<int64_t>()); }
+    if(val.is_number_integer()) { return ExprPtr(longToNewBOSSExpression(val.get<int64_t>())); }
     if(val.is_string()) {
       try {
-        return longToNewBOSSExpression(std::stoll(val.get<std::string>()));
+        return ExprPtr(longToNewBOSSExpression(std::stoll(val.get<std::string>())));
       } catch(const std::exception&) {
-        error = "Integer string is not a valid integer";
-        return nullptr;
+        error = "Integer string is not a valid integer"; return nullptr;
       }
     }
     error = "Integer requires an integer or string value";
     return nullptr;
   }
   if(type == "Real") {
-    if(val.is_number()) { return doubleToNewBOSSExpression(val.get<double>()); }
+    if(val.is_number()) { return ExprPtr(doubleToNewBOSSExpression(val.get<double>())); }
     if(val.is_string()) {
       try {
-        return doubleToNewBOSSExpression(std::stod(val.get<std::string>()));
+        return ExprPtr(doubleToNewBOSSExpression(std::stod(val.get<std::string>())));
       } catch(const std::exception&) {
         error = "Real string is not a valid number"; return nullptr;
       }
@@ -116,16 +111,16 @@ BOSSExpression* parseAtom(const std::string& type, const json& val, std::string&
   }
   if(type == "String") {
     if(!val.is_string()) { error = "String requires a string value"; return nullptr; }
-    return stringToNewBOSSExpression(val.get<std::string>().c_str());
+    return ExprPtr(stringToNewBOSSExpression(val.get<std::string>().c_str()));
   }
   if(type == "Symbol") {
     if(!val.is_string()) { error = "Symbol requires a string value"; return nullptr; }
-    return symbolNameToNewBOSSExpression(val.get<std::string>().c_str());
+    return ExprPtr(symbolNameToNewBOSSExpression(val.get<std::string>().c_str()));
   }
   return nullptr; // not a known atom type — caller treats as complex expression head
 }
 
-BOSSExpression* parseExpressionJSON(const json& value, std::string& error) {
+ExprPtr parseExpressionJSON(const json& value, std::string& error) {
   if(!value.is_array() || value.empty()) {
     error = "ExpressionJSON must be a non-empty array";
     return nullptr;
@@ -133,7 +128,7 @@ BOSSExpression* parseExpressionJSON(const json& value, std::string& error) {
 
   // typed atom: ["Type", value]
   if(value.size() == 2 && value[0].is_string()) {
-    BOSSExpression* atom = parseAtom(value[0].get<std::string>(), value[1], error);
+    ExprPtr atom = parseAtom(value[0].get<std::string>(), value[1], error);
     if(atom || !error.empty()) { return atom; }
   }
 
@@ -150,82 +145,73 @@ BOSSExpression* parseExpressionJSON(const json& value, std::string& error) {
     return nullptr;
   }
 
-  std::vector<BOSSExpression*> args;
+  std::vector<ExprPtr> args;
   args.reserve(value.size() - 1);
   for(size_t i = 1; i < value.size(); ++i) {
-    BOSSExpression* arg = parseExpressionJSON(value[i], error);
-    if(!arg) { freeArgs(args); return nullptr; }
-    args.push_back(arg);
+    ExprPtr arg = parseExpressionJSON(value[i], error);
+    if(!arg) { return nullptr; }
+    args.push_back(std::move(arg));
   }
   return buildComplex(headName, args);
 }
 
 // --- Regular JSON (object format) ---
 
-BOSSExpression* parseExpressionRegular(const json& value, std::string& error) {
+// Returns the "value" field if present and ok(value) holds; otherwise sets
+// error to msg and returns nullptr.
+template<typename Predicate>
+const json* requireValue(const json& obj, Predicate ok, std::string& error, const char* msg) {
+  auto it = obj.find("value");
+  if(it == obj.end() || !ok(*it)) { error = msg; return nullptr; }
+  return &*it;
+}
+
+ExprPtr parseExpressionRegular(const json& value, std::string& error) {
   if(!value.is_object()) { error = "expression must be an object"; return nullptr; }
 
   const std::string type = value.value("type", "");
+  const auto isInt = [](const json& j) { return j.is_number_integer(); };
+  const auto isNum = [](const json& j) { return j.is_number(); };
+  const auto isStr = [](const json& j) { return j.is_string(); };
 
   if(type == "bool") {
-    if(!value.contains("value") || !value["value"].is_boolean()) {
-      error = "bool expression requires boolean value"; return nullptr;
-    }
-    return boolToNewBOSSExpression(value["value"].get<bool>());
+    const json* v = requireValue(value, [](const json& j) { return j.is_boolean(); },
+                                 error, "bool expression requires boolean value");
+    return v ? ExprPtr(boolToNewBOSSExpression(v->get<bool>())) : nullptr;
   }
   if(type == "char") {
-    if(!value.contains("value") || !value["value"].is_number_integer()) {
-      error = "char expression requires integer value"; return nullptr;
-    }
-    const long long raw = value["value"].get<long long>();
-    if(raw < std::numeric_limits<int8_t>::min() || raw > std::numeric_limits<int8_t>::max()) {
-      error = "char expression value out of range"; return nullptr;
-    }
-    return charToNewBOSSExpression(static_cast<int8_t>(raw));
+    const json* v = requireValue(value, isInt, error, "char expression requires integer value");
+    if(!v) { return nullptr; }
+    const long long raw = v->get<long long>();
+    if(!inRange<int8_t>(raw)) { error = "char expression value out of range"; return nullptr; }
+    return ExprPtr(charToNewBOSSExpression(static_cast<int8_t>(raw)));
   }
   if(type == "int") {
-    if(!value.contains("value") || !value["value"].is_number_integer()) {
-      error = "int expression requires integer value"; return nullptr;
-    }
-    const long long raw = value["value"].get<long long>();
-    if(raw < std::numeric_limits<int32_t>::min() || raw > std::numeric_limits<int32_t>::max()) {
-      error = "int expression value out of range"; return nullptr;
-    }
-    return intToNewBOSSExpression(static_cast<int32_t>(raw));
+    const json* v = requireValue(value, isInt, error, "int expression requires integer value");
+    if(!v) { return nullptr; }
+    const long long raw = v->get<long long>();
+    if(!inRange<int32_t>(raw)) { error = "int expression value out of range"; return nullptr; }
+    return ExprPtr(intToNewBOSSExpression(static_cast<int32_t>(raw)));
   }
   if(type == "long") {
-    if(!value.contains("value") || !value["value"].is_number_integer()) {
-      error = "long expression requires integer value"; return nullptr;
-    }
-    const long long raw = value["value"].get<long long>();
-    if(raw < std::numeric_limits<int64_t>::min() || raw > std::numeric_limits<int64_t>::max()) {
-      error = "long expression value out of range"; return nullptr;
-    }
-    return longToNewBOSSExpression(static_cast<int64_t>(raw));
+    const json* v = requireValue(value, isInt, error, "long expression requires integer value");
+    return v ? ExprPtr(longToNewBOSSExpression(v->get<int64_t>())) : nullptr;
   }
   if(type == "float") {
-    if(!value.contains("value") || !value["value"].is_number()) {
-      error = "float expression requires numeric value"; return nullptr;
-    }
-    return floatToNewBOSSExpression(static_cast<float>(value["value"].get<double>()));
+    const json* v = requireValue(value, isNum, error, "float expression requires numeric value");
+    return v ? ExprPtr(floatToNewBOSSExpression(static_cast<float>(v->get<double>()))) : nullptr;
   }
   if(type == "double") {
-    if(!value.contains("value") || !value["value"].is_number()) {
-      error = "double expression requires numeric value"; return nullptr;
-    }
-    return doubleToNewBOSSExpression(value["value"].get<double>());
+    const json* v = requireValue(value, isNum, error, "double expression requires numeric value");
+    return v ? ExprPtr(doubleToNewBOSSExpression(v->get<double>())) : nullptr;
   }
   if(type == "string") {
-    if(!value.contains("value") || !value["value"].is_string()) {
-      error = "string expression requires string value"; return nullptr;
-    }
-    return stringToNewBOSSExpression(value["value"].get<std::string>().c_str());
+    const json* v = requireValue(value, isStr, error, "string expression requires string value");
+    return v ? ExprPtr(stringToNewBOSSExpression(v->get<std::string>().c_str())) : nullptr;
   }
   if(type == "symbol") {
-    if(!value.contains("value") || !value["value"].is_string()) {
-      error = "symbol expression requires string value"; return nullptr;
-    }
-    return symbolNameToNewBOSSExpression(value["value"].get<std::string>().c_str());
+    const json* v = requireValue(value, isStr, error, "symbol expression requires string value");
+    return v ? ExprPtr(symbolNameToNewBOSSExpression(v->get<std::string>().c_str())) : nullptr;
   }
   if(type == "call") {
     if(!value.contains("head") || !value["head"].is_string()) {
@@ -234,12 +220,12 @@ BOSSExpression* parseExpressionRegular(const json& value, std::string& error) {
     if(!value.contains("args") || !value["args"].is_array()) {
       error = "call expression requires array args"; return nullptr;
     }
-    std::vector<BOSSExpression*> args;
+    std::vector<ExprPtr> args;
     args.reserve(value["args"].size());
     for(const auto& arg : value["args"]) {
-      BOSSExpression* expr = parseExpressionRegular(arg, error);
-      if(!expr) { freeArgs(args); return nullptr; }
-      args.push_back(expr);
+      ExprPtr expr = parseExpressionRegular(arg, error);
+      if(!expr) { return nullptr; }
+      args.push_back(std::move(expr));
     }
     return buildComplex(value["head"].get<std::string>(), args);
   }
@@ -250,7 +236,7 @@ BOSSExpression* parseExpressionRegular(const json& value, std::string& error) {
 
 } // namespace
 
-BOSSExpression* parseExpression(const json& value, Format format, std::string& error) {
+ExprPtr parseExpression(const json& value, Format format, std::string& error) {
   if(format == Format::ExpressionJSON) return parseExpressionJSON(value, error);
   return parseExpressionRegular(value, error);
 }
@@ -262,23 +248,28 @@ json expressionToJson(const BOSSExpression* expression, Format format) {
     std::string head = getHeadName(expression);
     bool dateCol = isDateColumnName(head);
     size_t count = getArgumentCountFromBOSSExpression(expression);
-    BOSSExpression** args = getArgumentsFromBOSSExpression(expression);
+    ArgsPtr args(getArgumentsFromBOSSExpression(expression));
+    const bool isExprJson = format == Format::ExpressionJSON;
+
+    // For ExpressionJSON the head leads the array; push it first and reserve so
+    // a wide column (hundreds of thousands of rows) avoids reallocation and an
+    // O(n) front-insert.
     json children = json::array();
+    children.get_ref<json::array_t&>().reserve(count + (isExprJson ? 1 : 0));
+    if(isExprJson) { children.push_back(head); }
+
     for(size_t i = 0; i < count; ++i) {
-      if(dateCol && getBOSSExpressionTypeID(args[i]) == TypeID::Int) {
-        std::string iso = epochDayToIso(getIntValueFromBOSSExpression(args[i]));
-        children.push_back(format == Format::ExpressionJSON
+      BOSSExpression* arg = args.get()[i];
+      if(dateCol && getBOSSExpressionTypeID(arg) == TypeID::Int) {
+        std::string iso = epochDayToIso(getIntValueFromBOSSExpression(arg));
+        children.push_back(isExprJson
           ? json::array({"String", iso})
           : json{{"type", "string"}, {"value", iso}});
       } else {
-        children.push_back(expressionToJson(args[i], format));
+        children.push_back(expressionToJson(arg, format));
       }
     }
-    freeBOSSArguments(args);
-    if(format == Format::ExpressionJSON) {
-      children.insert(children.begin(), head);
-      return children;
-    }
+    if(isExprJson) { return children; }
     return {{"type", "call"}, {"head", head}, {"args", children}};
   }
 

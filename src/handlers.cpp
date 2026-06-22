@@ -54,19 +54,15 @@ json buildToolsList(Format format) {
 }
 
 json handleDescribeCall(const LogLevel& logLevel) {
-  BOSSSymbol* sym = symbolNameToNewBOSSSymbol("GetEngineDescription");
-  BOSSExpression* expr = newComplexBOSSExpression(sym, 0, nullptr);
-  freeBOSSSymbol(sym);
+  SymbolPtr sym(symbolNameToNewBOSSSymbol("GetEngineDescription"));
+  ExprPtr expr(newComplexBOSSExpression(sym.get(), 0, nullptr));
 
-  BOSSExpression* result = nullptr;
   std::string description;
   try {
-    result = BOSSEvaluate(expr);
-    char* raw = getNewStringValueFromBOSSExpression(result);
-    if(raw) { description = raw; freeBOSSString(raw); }
-    freeBOSSExpression(result);
+    // BOSSEvaluate consumes its input expression.
+    ExprPtr result(BOSSEvaluate(expr.release()));
+    description = toString(getNewStringValueFromBOSSExpression(result.get()));
   } catch(...) {
-    if(result) freeBOSSExpression(result);
     return toolResponse("GetEngineDescription failed", true);
   }
 
@@ -101,22 +97,19 @@ json handleToolsCall(const json& params, const LogLevel& logLevel, Format format
   }
 
   std::string error;
-  BOSSExpression* expression = parseExpression(arguments["expression"], format, error);
-  if(expression == nullptr) {
+  ExprPtr expression = parseExpression(arguments["expression"], format, error);
+  if(!expression) {
     return toolResponse(error, true);
   }
 
-  BOSSExpression* result = nullptr;
   json resultJson;
   try {
-    result = BOSSEvaluate(expression);
-    resultJson = expressionToJson(result, format);
-    freeBOSSExpression(result);
+    // BOSSEvaluate consumes its input expression.
+    ExprPtr result(BOSSEvaluate(expression.release()));
+    resultJson = expressionToJson(result.get(), format);
   } catch(const std::exception& e) {
-    if(result) freeBOSSExpression(result);
     return toolResponse(std::string("BOSS evaluation error: ") + e.what(), true);
   } catch(...) {
-    if(result) freeBOSSExpression(result);
     return toolResponse("BOSS evaluation error: unknown exception", true);
   }
 

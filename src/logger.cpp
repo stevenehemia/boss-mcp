@@ -4,34 +4,39 @@
 #include "transport.h"
 #include "nlohmann/json.hpp"
 
+
 namespace {
 
 bool shouldLog(LogLevel current, LogLevel message) {
-  if(current == LogLevel::kSilent) { return false; }
+  if(current == LogLevel::Silent) return false;
   return static_cast<int>(message) >= static_cast<int>(current);
 }
 
 const char* levelToName(LogLevel level) {
   switch(level) {
-    case LogLevel::kDebug: return "debug";
-    case LogLevel::kWarn: return "warn";
-    case LogLevel::kError: return "error";
+    case LogLevel::Debug: return "debug";
+    case LogLevel::Warn: return "warn";
+    case LogLevel::Error: return "error";
     default: return "info";
   }
 }
+
 } // namespace
+
 
 LogLevel parseLogLevel(const std::string& value) {
   const std::string lowered = toLower(value);
-  if(lowered == "debug") { return LogLevel::kDebug; }
-  if(lowered == "warn" || lowered == "warning") { return LogLevel::kWarn; }
-  if(lowered == "error") { return LogLevel::kError; }
-  if(lowered == "silent" || lowered == "none") { return LogLevel::kSilent; }
-  return LogLevel::kInfo;
+  if(lowered == "debug") return LogLevel::Debug;
+  if(lowered == "warn" || lowered == "warning") return LogLevel::Warn;
+  if(lowered == "error") return LogLevel::Error;
+  if(lowered == "silent" || lowered == "none") return LogLevel::Silent;
+  return LogLevel::Info;
 }
 
+
 void logMessage(const LogLevel& logLevel, LogLevel messageLevel, const std::string& text) {
-  if(!shouldLog(logLevel, messageLevel)) { return; }
+
+  if(!shouldLog(logLevel, messageLevel)) return;
   std::cerr << text << std::endl;
 
   nlohmann::json notification;

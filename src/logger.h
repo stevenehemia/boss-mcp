@@ -8,7 +8,7 @@
  * - warn: recoverable issues
  * - error: serious issues or something has failed
  */
-enum class LogLevel { kDebug, kInfo, kWarn, kError, kSilent };
+enum class LogLevel { Debug, Info, Warn, Error, Silent };
 
 LogLevel parseLogLevel(const std::string& value);
 void logMessage(const LogLevel& logLevel, LogLevel messageLevel, const std::string& text);

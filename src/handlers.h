@@ -3,4 +3,5 @@
 #include "logger.h"
 #include "nlohmann/json.hpp"
 
-bool handleRequest(const nlohmann::json& request, LogLevel& logLevel, Format format);
+bool handleRequest(const nlohmann::json& request, LogLevel& logLevel,
+                   QueryFormat queryFormat, ResultFormat resultFormat);

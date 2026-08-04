@@ -1,9 +1,10 @@
 #include <ctime>
 #include <limits>
+#include <optional>
 #include <string>
 #include <vector>
 #include "expression.h"
-#include "transport.h"
+#include "strutil.h"
 #include "BOSS.h"
 #include "nlohmann/json.hpp"
 
@@ -11,12 +12,11 @@ extern "C" char const* bossSymbolToNewString(struct BOSSSymbol const* arg);
 
 using json = nlohmann::json;
 
+namespace {
+
 // Maps the plain integers returned by getBOSSExpressionTypeID() to enum
 // values for clarity.
 enum TypeID { Bool, Char, Int, Long, Float, Double, String, Symbol, Complex };
-
-
-namespace {
 
 // Arrow date32 stores days since 1970-01-01 as int32_t.
 // Convert to "YYYY-MM-DD".
@@ -175,7 +175,7 @@ ExprPtr parseArrayJsonExpression(const json& value, std::string& error) {
             value[0][1].is_string()) {
     headName = value[0][1].get<std::string>();
   } else {
-    error = "ExpressionJSON head must be a string or [\"Symbol\", name]";
+    error = "Array JSON head must be a string or [\"Symbol\", name]";
     return nullptr;
   }
 
@@ -284,11 +284,14 @@ ExprPtr parseObjectJsonExpression(const json& value, std::string& error) {
   return nullptr;
 }
 
-// ColumnarJSON: A Complex becomes ["Head", arg, ...]; an atom becomes ["Type", value].
+// TypedColumnarJSON: A Complex becomes ["Head", arg, ...]; an atom becomes
+// ["Type", value]. This is BOSS's general ExpressionJSON encoding -- it can
+// represent *any* result (table, bare scalar, error), which is why every
+// table-only format below falls back to it, and why it alone keeps a head tag.
 // Date columns (int32 days-since-epoch) are rendered back to ISO strings.
 // dateCol means this expression sits inside a date-named column.
 // A Complex node computes the flag from its own head for its children.
-json toColumnarJson(const BOSSExpression* expression, bool dateCol = false) {
+json toTypedColumnarJson(const BOSSExpression* expression, bool dateCol = false) {
 
   const int typeID = getBOSSExpressionTypeID(expression);
 
@@ -304,7 +307,7 @@ json toColumnarJson(const BOSSExpression* expression, bool dateCol = false) {
     children.get_ref<json::array_t&>().reserve(argCount + 1);
     children.push_back(head);
     for(size_t i = 0; i < argCount; ++i) {
-      children.push_back(toColumnarJson(args.get()[i], childrenAreDates));
+      children.push_back(toTypedColumnarJson(args.get()[i], childrenAreDates));
     }
     return children;
   }
@@ -355,54 +358,145 @@ json cellToPlainJson(const BOSSExpression* expression, bool dateCol) {
       return s;
     }
     // A cell shouldn't be complex in a result table; preserve it columnar.
-    case TypeID::Complex: return toColumnarJson(expression);
+    case TypeID::Complex: return toTypedColumnarJson(expression);
     default: return json(nullptr);
   }
 }
 
-// RowRepJson: match a conventional REST API would return (array of row objects).
-// Pivot the columnar BOSS' Table expression Table[ col1[v...], col2[v...], ... ]
-// into row-major records [{"col1": v, "col2": v, ...}, ...].
-// Row count is taken from the first column; shorter columns are padded with null,
-// longer ones are silently truncated.
-json tableToRowRepJson(const BOSSExpression* table) {
+// Per-column metadata + owned argument pointers, pivoted once out of a Table's
+// Complex columns and shared by all four table-only serializers below -- they
+// need the same name/date-flag/height/cells extraction, and differ only in the
+// JSON shape they build from it. expressionToJson does the extraction once and
+// hands the result down, so the serializers below are pure ColumnData -> json.
+struct ColumnData {
+  std::vector<std::string> names;
+  std::vector<bool> dateCols;
+  std::vector<size_t> heights;
+  std::vector<ArgsPtr> cells;  // owns each column's argument array
+  size_t ncols = 0;
+  size_t nrows = 0;  // row count from the first column
+};
 
-  size_t ncols = getArgumentCountFromBOSSExpression(table);
+// The cell at (row r, column c) as a plain JSON value.
+//
+// A well-formed Table has every column the same height, but nothing enforces
+// that here, so `nrows` is taken from the first column and every serializer
+// reads through this one accessor: short columns read as null past their end,
+// long ones are truncated by the caller's `r < d.nrows` bound. Going through a
+// single accessor is what keeps all four formats presenting a malformed Table
+// *identically* -- previously the two column-major ones iterated each column's
+// own height instead and emitted ragged output where the row-major two padded.
+json cellAt(const ColumnData& d, size_t r, size_t c) {
+  if(r >= d.heights[c]) return json(nullptr);
+  return cellToPlainJson(d.cells[c].get()[r], d.dateCols[c]);
+}
+
+bool isTableExpression(const BOSSExpression* expression) {
+  return getBOSSExpressionTypeID(expression) == TypeID::Complex &&
+         getHeadName(expression) == "Table";
+}
+
+// Nullopt (caller falls back to toTypedColumnarJson) if any column isn't
+// Complex -- not a well-formed Table.
+std::optional<ColumnData> extractColumns(const BOSSExpression* table) {
+  ColumnData out;
+  out.ncols = getArgumentCountFromBOSSExpression(table);
   ArgsPtr colArgs(getArgumentsFromBOSSExpression(table));
-  std::vector<std::string> names(ncols);
-  std::vector<bool> dateCols(ncols);
-  std::vector<size_t> heights(ncols);
-  // Owning argument arrays, one per column; keeps every column's cell
-  // pointers alive for the whole pivot.
-  std::vector<ArgsPtr> cells(ncols);
-  size_t nrows = 0;
+  out.names.resize(out.ncols);
+  out.dateCols.resize(out.ncols);
+  out.heights.resize(out.ncols);
+  out.cells.resize(out.ncols);
 
-  for(size_t c = 0; c < ncols; ++c) {
+  for(size_t c = 0; c < out.ncols; ++c) {
     BOSSExpression* col = colArgs.get()[c];
-    // A well-formed Table has Complex columns; anything else can't be pivoted.
-    if(getBOSSExpressionTypeID(col) != TypeID::Complex) return toColumnarJson(table);
-    names[c] = getHeadName(col);
-    dateCols[c] = isDateColumnName(names[c]);
-    heights[c] = getArgumentCountFromBOSSExpression(col);
-    cells[c] = ArgsPtr(getArgumentsFromBOSSExpression(col));
-    if(c == 0) nrows = heights[c];
+    if(getBOSSExpressionTypeID(col) != TypeID::Complex) return std::nullopt;
+    out.names[c] = getHeadName(col);
+    out.dateCols[c] = isDateColumnName(out.names[c]);
+    out.heights[c] = getArgumentCountFromBOSSExpression(col);
+    out.cells[c] = ArgsPtr(getArgumentsFromBOSSExpression(col));
   }
+  if(out.ncols > 0) out.nrows = out.heights[0];
+  return out;
+}
 
+// ArrayOfObjectsJson: what a conventional REST API would return (array of row
+// objects). Pivot the columnar BOSS Table expression
+// Table[ col1[v...], col2[v...], ... ] into row-major records
+// [{"col1": v, "col2": v, ...}, ...] -- so every column name repeats once per
+// record, which is what makes this the most expensive format on tokens.
+json tableToArrayOfObjectsJson(const ColumnData& d) {
   json rows = json::array();
-  rows.get_ref<json::array_t&>().reserve(nrows);
+  rows.get_ref<json::array_t&>().reserve(d.nrows);
 
-  for(size_t r = 0; r < nrows; ++r) {
+  for(size_t r = 0; r < d.nrows; ++r) {
     json obj = json::object();
-    for(size_t c = 0; c < ncols; ++c) {
-      obj[names[c]] =
-          (r < heights[c])
-          ? cellToPlainJson(cells[c].get()[r], dateCols[c])
-          : json(nullptr);
+    for(size_t c = 0; c < d.ncols; ++c) {
+      obj[d.names[c]] = cellAt(d, r, c);
     }
     rows.push_back(std::move(obj));
   }
 
   return rows;
+}
+
+// ColumnarJson: pure columnar (BOSS's own DSM layout), per-value type tags
+// dropped -- ["col1", v1, v2, ...], ["col2", v1, v2, ...], ...
+json tableToColumnarJson(const ColumnData& d) {
+  json cols = json::array();
+  cols.get_ref<json::array_t&>().reserve(d.ncols);
+  for(size_t c = 0; c < d.ncols; ++c) {
+    json col = json::array();
+    col.get_ref<json::array_t&>().reserve(d.nrows + 1);
+    col.push_back(d.names[c]);
+    for(size_t r = 0; r < d.nrows; ++r) {
+      col.push_back(cellAt(d, r, c));
+    }
+    cols.push_back(std::move(col));
+  }
+  return cols;
+}
+
+// IndexedColumnarJson: columnar, tags dropped, each cell additionally paired
+// with its row position -- ["col1", [0, v0], [1, v1], ...], ... -- so a
+// value can be bound back to its row by matching indices directly instead of
+// counting positions across separate parallel arrays.
+json tableToIndexedColumnarJson(const ColumnData& d) {
+  json cols = json::array();
+  cols.get_ref<json::array_t&>().reserve(d.ncols);
+  for(size_t c = 0; c < d.ncols; ++c) {
+    json col = json::array();
+    col.get_ref<json::array_t&>().reserve(d.nrows + 1);
+    col.push_back(d.names[c]);
+    for(size_t r = 0; r < d.nrows; ++r) {
+      col.push_back(json::array({static_cast<int64_t>(r), cellAt(d, r, c)}));
+    }
+    cols.push_back(std::move(col));
+  }
+  return cols;
+}
+
+// PositionalRowsJson: schema declared once, then rows as positional
+// value-tuples -- ["Schema", "col1", "col2", ...], [v1, v2, ...], ... --
+// the format actually isomorphic to classical NSM (schema lives once, not
+// repeated per row the way ArrayOfObjectsJson's object keys do).
+json tableToPositionalRowsJson(const ColumnData& d) {
+  json schema = json::array();
+  schema.get_ref<json::array_t&>().reserve(d.ncols + 1);
+  schema.push_back("Schema");
+  for(size_t c = 0; c < d.ncols; ++c) schema.push_back(d.names[c]);
+
+  json out = json::array();
+  out.get_ref<json::array_t&>().reserve(d.nrows + 1);
+  out.push_back(std::move(schema));
+  for(size_t r = 0; r < d.nrows; ++r) {
+    json row = json::array();
+    row.get_ref<json::array_t&>().reserve(d.ncols);
+    for(size_t c = 0; c < d.ncols; ++c) {
+      row.push_back(cellAt(d, r, c));
+    }
+    out.push_back(std::move(row));
+  }
+  return out;
 }
 
 }  // namespace
@@ -415,15 +509,21 @@ ExprPtr parseExpression(const json& value, QueryFormat format, std::string& erro
 
 
 json expressionToJson(const BOSSExpression* expression, ResultFormat format) {
-  if(format == ResultFormat::RowRepJson) {
-    // Row-repeated is only defined for a Table; any other result (scalar,
-    // ErrorWhenEvaluatingExpression, ...) falls back to the columnar form so it
-    // stays representable.
-    if(getBOSSExpressionTypeID(expression) == TypeID::Complex &&
-       getHeadName(expression) == "Table") {
-      return tableToRowRepJson(expression);
+  // Every format but TypedColumnarJson is only defined for a well-formed Table.
+  // Anything else -- a scalar, an ErrorWhenEvaluatingExpression, a Table whose
+  // columns aren't Complex -- falls through to the typed form, which can
+  // represent any expression. That single fallthrough is the only place this
+  // decision is made; the serializers below never see a malformed input.
+  if(format != ResultFormat::TypedColumnarJson && isTableExpression(expression)) {
+    if(std::optional<ColumnData> d = extractColumns(expression)) {
+      switch(format) {
+        case ResultFormat::ColumnarJson: return tableToColumnarJson(*d);
+        case ResultFormat::IndexedColumnarJson: return tableToIndexedColumnarJson(*d);
+        case ResultFormat::PositionalRowsJson: return tableToPositionalRowsJson(*d);
+        case ResultFormat::ArrayOfObjectsJson: return tableToArrayOfObjectsJson(*d);
+        case ResultFormat::TypedColumnarJson: break;  // excluded by the guard above
+      }
     }
-    return toColumnarJson(expression);
   }
-  return toColumnarJson(expression);
+  return toTypedColumnarJson(expression);
 }

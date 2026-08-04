@@ -3,6 +3,7 @@
 #include <iostream>
 #include <cctype>
 #include "transport.h"
+#include "strutil.h"
 #include "nlohmann/json.hpp"
 
 using json = nlohmann::json;
@@ -20,16 +21,6 @@ std::string buildFrame(const json& message) {
   return "Content-Length: " + std::to_string(payload.size()) + "\r\n\r\n" + payload;
 }
 
-}  // namespace
-
-
-std::string toLower(std::string value) {
-  for(char& c : value) {
-    c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-  }
-  return value;
-}
-
 
 std::string trim(std::string value) {
 
@@ -42,9 +33,11 @@ std::string trim(std::string value) {
   while(end > start && std::isspace(static_cast<unsigned char>(value[end - 1]))) {
     --end;
   }
-  
+
   return value.substr(start, end - start);
 }
+
+}  // namespace
 
 
 std::optional<std::string> readMessage(std::istream& input) {

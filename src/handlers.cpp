@@ -19,16 +19,22 @@ json toolResponse(const std::string& text, bool isError) {
 
 json buildToolsList(QueryFormat queryFormat) {
 
-  constexpr const char* evaluateDescription =
-      "Evaluate a BOSS expression. Call boss_describe first to get the complete operator "
-      "reference. Operation examples: "
-      "Load CSV: [\"Load\", [\"String\", \"/absolute/path/to/file.csv\"]] — always use absolute "
-      "paths. "
-      "In-memory table: [\"Table\", [\"ColName\", val1, val2, ...]]. "
-      "Column reference: [\"Symbol\", \"colname\"]. "
-      "Type cast: [\"Int\", [\"Symbol\", \"col\"]]. "
-      "Multi-step queries: Name(table, [\"Symbol\", \"label\"]) stores a result; "
-      "ByName([\"Symbol\", \"label\"]) retrieves it.";
+  // Operation examples must match the active query format — the object parser
+  // rejects array-form expressions and vice versa.
+  const std::string evaluateDescription =
+      queryFormat == QueryFormat::ArrayJson
+          ? R"(Evaluate a BOSS expression. Call boss_describe first to get the complete operator reference. Operation examples: )"
+            R"(Load CSV: ["Load", ["String", "/absolute/path/to/file.csv"]] — always use absolute paths. )"
+            R"(In-memory table: ["Table", ["ColName", val1, val2, ...]]. )"
+            R"(Column reference: ["Symbol", "colname"]. )"
+            R"(Type cast: ["Int", ["Symbol", "col"]]. )"
+            R"(Multi-step queries: Name(table, ["Symbol", "label"]) stores a result; ByName(["Symbol", "label"]) retrieves it.)"
+          : R"(Evaluate a BOSS expression. Call boss_describe first to get the complete operator reference. Operation examples: )"
+            R"(Load CSV: {"type":"call","head":"Load","args":[{"type":"string","value":"/absolute/path/to/file.csv"}]} — always use absolute paths. )"
+            R"(In-memory table: {"type":"call","head":"Table","args":[{"type":"call","head":"ColName","args":[v1, v2, ...]}]}. )"
+            R"(Column reference: {"type":"symbol","value":"colname"}. )"
+            R"(Type cast: {"type":"call","head":"Int","args":[{"type":"symbol","value":"col"}]}. )"
+            R"(Multi-step queries: Name(table, {"type":"symbol","value":"label"}) stores a result; ByName({"type":"symbol","value":"label"}) retrieves it.)";
 
   const std::string expressionDescription =
       queryFormat == QueryFormat::ArrayJson

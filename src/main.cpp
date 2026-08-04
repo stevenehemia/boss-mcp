@@ -1,4 +1,6 @@
+#include <cstddef>
 #include <iostream>
+#include <string>
 #include "expression.h"
 #include "logger.h"
 #include "transport.h"
@@ -7,34 +9,59 @@
 using json = nlohmann::json;
 
 
-static bool parseQueryFormat(const std::string& v, QueryFormat& out) {
-  if(v == "arrayjson") {
-    out = QueryFormat::ArrayJson;
-    return true;
-  }
-  if(v == "objectjson") {
-    out = QueryFormat::ObjectJson;
-    return true;
+namespace {
+
+// The accepted --query-format=/--result-format= values. Adding a format is one
+// row here; both the parser and the error message read from the same table, so
+// the two can't drift apart.
+template <typename T>
+struct FormatName {
+  const char* name;
+  T value;
+};
+
+constexpr FormatName<QueryFormat> queryFormats[] = {
+    {"arrayjson", QueryFormat::ArrayJson},
+    {"objectjson", QueryFormat::ObjectJson},
+};
+
+constexpr FormatName<ResultFormat> resultFormats[] = {
+    {"columnarjson", ResultFormat::ColumnarJson},
+    {"typedcolumnarjson", ResultFormat::TypedColumnarJson},
+    {"indexedcolumnarjson", ResultFormat::IndexedColumnarJson},
+    {"positionalrowsjson", ResultFormat::PositionalRowsJson},
+    {"arrayofobjectsjson", ResultFormat::ArrayOfObjectsJson},
+};
+
+template <typename T, size_t N>
+bool parseFormat(const std::string& v, const FormatName<T> (&table)[N], T& out) {
+  for(const FormatName<T>& entry : table) {
+    if(v == entry.name) {
+      out = entry.value;
+      return true;
+    }
   }
   return false;
 }
 
-
-static bool parseResultFormat(const std::string& v, ResultFormat& out) {
-  if(v == "columnarjson") {
-    out = ResultFormat::ColumnarJson;
-    return true;
+// "a or b" / "a, b, or c" — for the error message, generated from the table.
+template <typename T, size_t N>
+std::string acceptedValues(const FormatName<T> (&table)[N]) {
+  std::string out;
+  for(size_t i = 0; i < N; ++i) {
+    if(i > 0) out += (N > 2) ? ", " : " ";
+    if(i > 0 && i + 1 == N) out += "or ";
+    out += table[i].name;
   }
-  if(v == "rowrepjson") {
-    out = ResultFormat::RowRepJson;
-    return true;
-  }
-  return false;
+  return out;
 }
+
+}  // namespace
 
 
 int main(int argc, char* argv[]) {
-  // Default: BOSS-native on both sides (array query in, columnar out)
+  // Default: BOSS-native array query in; plain columnar out. Pass
+  // --result-format=typedcolumnarjson for the fully tagged ExpressionJSON form.
   QueryFormat queryFormat = QueryFormat::ArrayJson;
   ResultFormat resultFormat = ResultFormat::ColumnarJson;
 
@@ -43,15 +70,15 @@ int main(int argc, char* argv[]) {
   for(int i = 1; i < argc; ++i) {
     const std::string arg = argv[i];
     if(arg.rfind(Q, 0) == 0) {
-      if(!parseQueryFormat(arg.substr(Q.size()), queryFormat)) {
+      if(!parseFormat(arg.substr(Q.size()), queryFormats, queryFormat)) {
         std::cerr << "Unknown query format: " << arg.substr(Q.size())
-                  << " (expected arrayjson or objectjson)" << std::endl;
+                  << " (expected " << acceptedValues(queryFormats) << ")" << std::endl;
         return 1;
       }
     } else if(arg.rfind(R, 0) == 0) {
-      if(!parseResultFormat(arg.substr(R.size()), resultFormat)) {
+      if(!parseFormat(arg.substr(R.size()), resultFormats, resultFormat)) {
         std::cerr << "Unknown result format: " << arg.substr(R.size())
-                  << " (expected columnarjson or rowrepjson)" << std::endl;
+                  << " (expected " << acceptedValues(resultFormats) << ")" << std::endl;
         return 1;
       }
     } else {

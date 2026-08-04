@@ -2,6 +2,7 @@
 #include <string>
 #include "logger.h"
 #include "transport.h"
+#include "strutil.h"
 #include "nlohmann/json.hpp"
 
 

@@ -1,37 +1,71 @@
 #pragma once
+#include <cstddef>
+#include <optional>
 #include <string>
+#include <vector>
 #include "BOSS.h"
 #include "boss_raii.h"
 #include "nlohmann/json.hpp"
 
-// How the agent's query (tool input) is encoded.
-//   ArrayJson  : positional arrays    ["Op", arg, ...]   / atoms ["String","s"]
-//   ObjectJson : tagged objects        {"type":"call","head":"Op","args":[...]}
+// ArrayJson  : positional arrays  ["Op", arg, ...] / atoms ["String","s"]
+// ObjectJson : tagged objects     {"type":"call","head":"Op","args":[...]}
 enum class QueryFormat { ArrayJson, ObjectJson };
 
-// How the result Table (tool output) is laid out.
-//   ColumnarJson        : column-major, type tags dropped   ["col", v1, v2, ...], ...
-//   TypedColumnarJson   : column-major ExpressionJSON  ["Table", ["col", ["Type", v1], ...], ...]
-//   IndexedColumnarJson : column-major, tags dropped, each cell paired with its
-//                         row index   ["col", [0, v1], [1, v2], ...], ...
-//   PositionalRowsJson  : row-major, schema declared once, rows as positional
-//                         value-tuples   ["Schema", "col1", ...], [v1, v2, ...], ...
-//   ArrayOfObjectsJson  : row-major, one JSON object per row, so the column
-//                         names repeat on every record   [{"col": v1, ...}, ...]
-// The two row-major formats differ in how a value is addressed: by position
-// (PositionalRowsJson) or by key (ArrayOfObjectsJson). PositionalRowsJson is the
-// one isomorphic to classical NSM -- schema stored once, not repeated per tuple.
-//
-// Everything except TypedColumnarJson is table-only by construction and carries
-// no "Table" head. TypedColumnarJson is BOSS's general expression encoding --
-// it represents every result shape including errors and bare scalars, so its
-// head tag is the only way to tell those apart, and expressionToJson falls back
-// to it for any non-Table result. That fallback is exactly what lets the other
-// four skip the head: a client tells them apart by whether the parsed top-level
-// value starts with a string (typed: Table/error/scalar) or not.
+// ColumnarJson        : column-major, no type tags
+//                       ["col", v1, v2, ...], ...
+// TypedColumnarJson   : BOSS-native expression
+//                       ["Table", ["col", ["Type", v1], ...], ...]
+// IndexedColumnarJson : column-major, each cell paired with its row index
+//                       ["col", [0, v1], [1, v2], ...], ...
+// PositionalRowsJson  : row-major, schema declared once, rows are tuples
+//                       ["Schema", "col1", ...], [v1, v2, ...], ...
+// ArrayOfObjectsJson  : row-major, conventional REST API response,
+//                       one JSON object per row, column names are repeated
+//                       [{"col": v1, ...}, ...]
+// Auto                : not a layout — let the layouter pick the best format
 enum class ResultFormat {
-  ColumnarJson, TypedColumnarJson, IndexedColumnarJson, PositionalRowsJson, ArrayOfObjectsJson
+  ColumnarJson,TypedColumnarJson, IndexedColumnarJson,
+  PositionalRowsJson, ArrayOfObjectsJson, Auto
+};
+
+// Per-column metadata
+struct ColumnData {
+  std::vector<std::string> names;
+  std::vector<bool> dateCols;
+  std::vector<size_t> heights;
+  std::vector<ArgsPtr> cells;
+  size_t ncols = 0;
+  size_t nrows = 0;
 };
 
 ExprPtr parseExpression(const nlohmann::json& value, QueryFormat format, std::string& error);
-nlohmann::json expressionToJson(const BOSSExpression* expression, ResultFormat format);
+
+// If the expression's top-level operator is exactly
+// Slice(<inner>, ["Int", offset], ["Int", count]) - the likely query 
+// agents use for follow-up pagination calls - returns `offset`
+// Nullopt for anything else
+std::optional<size_t> detectSliceOffset(const BOSSExpression* expression);
+
+// Same detection as detectSliceOffset, but takes the RAW pre-parse json
+// and returns the json for `inner` alone
+std::optional<nlohmann::json> detectSliceInnerJson(const nlohmann::json& value, QueryFormat format);
+
+// labelOffset biases IndexedColumnarJson's row labels
+// Pass detectSliceOffset's result to keep a follow-up page's labels
+// absolute relative to the query the agent originally paged from
+nlohmann::json expressionToJson(const BOSSExpression* expression, ResultFormat format,
+                                size_t labelOffset = 0);
+
+// Extract table metadata from BOSS expression
+// Nullopt if expression isn't a Table, or is one whose columns aren't all Complex
+// Callers fall back to toTypedColumnarJson, which represents everything.
+std::optional<ColumnData> extractTable(const BOSSExpression* expression);
+
+// Serializes rows [rowOffset, rowOffset + rowCount) of `data` in the given format
+// TypedColumnarJson is treated as ColumnarJson if passed as it is the general
+// expression encoding, not a table layout
+nlohmann::json serializeTable(const ColumnData& data, ResultFormat format,
+                              size_t rowOffset, size_t rowCount, size_t labelOffset = 0);
+
+// BOSS's native expression representation - the fallback for any non-Table.
+nlohmann::json toTypedColumnarJson(const BOSSExpression* expression);

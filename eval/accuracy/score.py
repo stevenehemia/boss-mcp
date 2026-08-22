@@ -1,14 +1,7 @@
 """
 Score the accuracy experiment: parse the model's answer and compare it to the
 ground truth expected answer.
-
-The model is instructed to answer with ONLY `{"answer": ...}`; parse_answer
-tolerates code fences and stray prose around the object. A trial whose answer
-can't be parsed scores wrong and is flagged malformed
-
-Numeric match: relative tolerance REL_TOL (matches tasks.py). EXTREMUM needs
-the date exact AND the value within tolerance. AGGREGATE is a plain number,
-scored the same way as LOOKUP.
+The model is instructed to answer with ONLY `{"answer": ...}`
 """
 
 import json
@@ -33,9 +26,9 @@ def parse_answer(text):
     return obj["answer"]
 
 
-def _num_match(got, expected):
+def num_match(got, expected):
     try:
-        got = float(got)
+        got, expected = float(got), float(expected)
     except (TypeError, ValueError):
         return False
     return abs(got - expected) <= REL_TOL * max(abs(expected), 1e-9)
@@ -45,11 +38,11 @@ def score(task, answer, expected):
     """True iff the parsed answer matches ground truth for this task type."""
     if answer is None:
         return False
-    if task == "lookup" or task == "aggregate":
-        return _num_match(answer, expected)
+    if task in ("lookup", "aggregate"):
+        return num_match(answer, expected)
     if task == "extremum":
         if not isinstance(answer, dict):
             return False
         return (str(answer.get("date", "")).strip() == expected["date"]
-                and _num_match(answer.get("value"), expected["value"]))
+                and num_match(answer.get("value"), expected["value"]))
     raise ValueError(f"unknown task: {task}")

@@ -18,11 +18,15 @@ Makefile
 # OS files
 .DS_Store
 
-# Backup files
-backup/
-
 # Data files
 data/
 
-# AI assist
-CLAUDE.md
+# Markdown files
+*.md
+!**/README.md
+
+# Generated plots
+*.png
+
+# Miscellaneous
+layouter/

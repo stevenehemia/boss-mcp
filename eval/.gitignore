@@ -1,0 +1,26 @@
+# virtualenvs and caches
+/.venv/
+__pycache__/
+
+# Unused evaluations
+baseline_live/
+baseline_static/
+format2x2/
+
+# efficiency evaluation outputs
+efficiency/results*/
+efficiency/backup/
+efficiency/ab_test/
+efficiency/*.json*
+efficiency/prompt.arrayjson.txt
+efficiency/questions.tsv
+
+# accuracy evaluation outputs
+accuracy/.venv/
+accuracy/results*/
+accuracy/reports/
+accuracy/*.json*
+accuracy/system_prompt.txt
+
+# token_cost evaluation outputs
+token_cost/results*/

@@ -34,8 +34,6 @@ constexpr FormatName<ResultFormat> resultFormats[] = {
     {"auto", ResultFormat::Auto},
 };
 
-// "on"/"off", not "true"/"false" -- matches the vocabulary eval/'s own
-// --thinking on|off flags already use for this exact axis (theta).
 constexpr FormatName<bool> thinkingValues[] = {
     {"off", false},
     {"on", true},
@@ -98,22 +96,14 @@ std::optional<std::string> flagValue(const std::string& arg, std::string_view fl
   return arg.substr(flag.size());
 }
 
-// Reports a startup failure. Returns 1 so callers can `return fail(...)`,
-// keeping each branch's failure path to a single line.
+// Reports a startup failure
 int fail(const std::string& message) {
   std::cerr << message << std::endl;
   return 1;
 }
 
-// One row per accepted flag — the same "single source of truth" shape as the
-// format tables above, so the argument loop below has no per-flag branches to
-// keep in sync. Adding a flag is one row.
-//
 // `parse` and `expected` are captureless lambdas, which convert to plain
-// function pointers, so this table stays constexpr: no std::function, no type
-// erasure, no allocation. Each `parse` adapts one underlying parser to the
-// common (value, config) shape; each `expected` supplies the tail of the error
-// message, generated from the format tables where there is one.
+// function pointers
 struct FlagSpec {
   const char* flag;
   const char* errorLabel;
@@ -132,7 +122,7 @@ constexpr FlagSpec flagSpecs[] = {
      [](const std::string& v, ServerConfig& c) { return parseResultSizeChars(v, c.maxResultSizeChars); },
      [] { return std::string("a non-negative integer number of characters"); }},
     {"--default-thinking=", "Unknown thinking setting",
-     [](const std::string& v, ServerConfig& c) { return parseFormat(v, thinkingValues, c.defaultThinking); },
+     [](const std::string& v, ServerConfig& c) { return parseFormat(v, thinkingValues, c.cost.defaultThinking); },
      [] { return acceptedValues(thinkingValues); }},
 };
 
@@ -159,6 +149,19 @@ int main(int argc, char* argv[]) {
       break;
     }
     if(!matched) return fail("Unknown argument: " + arg);
+  }
+
+  // Set the layouter's budget to be lower than the actual maxResultSizeChars
+  // by a fixed margin to avoid serving a page that sits around the limit
+  constexpr double budgetMargin = 0.2;
+  const auto margined =
+      static_cast<size_t>(config.maxResultSizeChars * (1.0 - budgetMargin));
+  config.cost.budgetChars =
+      config.maxResultSizeChars == 0 ? 0 : (margined == 0 ? 1 : margined);
+
+  // Validate the cost tables before starting the main loop
+  if(const auto problem = validateCostConfig(config.cost)) {
+    return fail("Invalid cost tables in layouter.h: " + *problem);
   }
 
   LogLevel logLevel = LogLevel::Info;

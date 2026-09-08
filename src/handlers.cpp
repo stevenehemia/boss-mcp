@@ -21,23 +21,25 @@ json toolResponse(const std::string& text, bool isError) {
 
 json buildToolsList(const ServerConfig& config) {
 
+  const bool arrayFormat = config.queryFormat == QueryFormat::ArrayJson;
+
   const std::string evaluateDescription =
-      config.queryFormat == QueryFormat::ArrayJson
-          ? R"(Evaluate a BOSS expression. Call boss_describe first to get the complete operator reference. Operation examples: )"
-            R"(Load CSV: ["Load", ["String", "/absolute/path/to/file.csv"]] — always use absolute paths. )"
+      std::string(
+          R"(Evaluate a BOSS expression. Call boss_describe first to get the complete operator reference. Operation examples: )") +
+      (arrayFormat
+          ? R"(Load CSV: ["Load", ["String", "/absolute/path/to/file.csv"]] — always use absolute paths. )"
             R"(In-memory table: ["Table", ["ColName", val1, val2, ...]]. )"
             R"(Column reference: ["Symbol", "colname"]. )"
             R"(Type cast: ["Int", ["Symbol", "col"]]. )"
             R"(Multi-step queries: Name(table, ["Symbol", "label"]) stores a result; ByName(["Symbol", "label"]) retrieves it.)"
-          : R"(Evaluate a BOSS expression. Call boss_describe first to get the complete operator reference. Operation examples: )"
-            R"(Load CSV: {"type":"call","head":"Load","args":[{"type":"string","value":"/absolute/path/to/file.csv"}]} — always use absolute paths. )"
+          : R"(Load CSV: {"type":"call","head":"Load","args":[{"type":"string","value":"/absolute/path/to/file.csv"}]} — always use absolute paths. )"
             R"(In-memory table: {"type":"call","head":"Table","args":[{"type":"call","head":"ColName","args":[v1, v2, ...]}]}. )"
             R"(Column reference: {"type":"symbol","value":"colname"}. )"
             R"(Type cast: {"type":"call","head":"Int","args":[{"type":"symbol","value":"col"}]}. )"
-            R"(Multi-step queries: Name(table, {"type":"symbol","value":"label"}) stores a result; ByName({"type":"symbol","value":"label"}) retrieves it.)";
+            R"(Multi-step queries: Name(table, {"type":"symbol","value":"label"}) stores a result; ByName({"type":"symbol","value":"label"}) retrieves it.)");
 
   const std::string expressionDescription =
-      config.queryFormat == QueryFormat::ArrayJson
+      arrayFormat
           ? R"(ExpressionJSON array format. )"
             R"(Example (load CSV and filter rows where code = "GBR"): )"
             R"(["Filter", ["Load", ["String", "/absolute/path/to/data.csv"]], ["Equal", ["Symbol", "code"], ["String", "GBR"]]])"
@@ -46,7 +48,7 @@ json buildToolsList(const ServerConfig& config) {
             R"(Example (load CSV and filter rows where code = "GBR"): )"
             R"({"type":"call","head":"Filter","args":[{"type":"call","head":"Load","args":[{"type":"string","value":"/absolute/path/to/data.csv"}]},{"type":"call","head":"Equal","args":[{"type":"symbol","value":"code"},{"type":"string","value":"GBR"}]}]})";
 
-  const char* expressionType = config.queryFormat == QueryFormat::ArrayJson ? "array" : "object";
+  const char* expressionType = arrayFormat ? "array" : "object";
 
   json properties = {
       {"expression", {{"type", expressionType}, {"description", expressionDescription}}}};
@@ -64,20 +66,19 @@ json buildToolsList(const ServerConfig& config) {
          "over all rows. Omit if none applies."}};
 
     paginationNote =
-        config.queryFormat == QueryFormat::ArrayJson
-            ? R"( The result may come back paginated as )"
-              R"({"table":..., "overbudget_row_count":N} instead of the full data. If )"
-              R"(overbudget_row_count is greater than 0, that many rows were withheld -- fetch )"
-              R"(them with ["Slice", <expression>, ["Int", <rows of this query you already )"
+        std::string(
+            R"( The result may come back paginated as )"
+            R"({"table":..., "overbudget_row_count":N} instead of the full data. If )"
+            R"(overbudget_row_count is greater than 0, that many rows were withheld -- fetch )"
+            R"(them with )") +
+        (arrayFormat
+            ? R"(["Slice", <expression>, ["Int", <rows of this query you already )"
               R"(have>], ["Int", overbudget_row_count]] -- offset/count must use "Int" (32-bit); )"
               R"("Integer" is rejected.)"
-            : R"( The result may come back paginated as )"
-              R"({"table":..., "overbudget_row_count":N} instead of the full data. If )"
-              R"(overbudget_row_count is greater than 0, that many rows were withheld -- fetch )"
-              R"(them with {"type":"call","head":"Slice","args":[<expression>, )"
+            : R"({"type":"call","head":"Slice","args":[<expression>, )"
               R"({"type":"int","value":<rows of this query you already have>}, )"
               R"({"type":"int","value":overbudget_row_count}]} -- offset/count must use "int" )"
-              R"((32-bit); "long" is rejected.)";
+              R"((32-bit); "long" is rejected.)");
   }
 
   json evaluateTool;
@@ -129,6 +130,63 @@ json handleDescribeCall(const LogLevel& logLevel) {
 }
 
 
+// The layout decision for a follow-up Slice call is costed against the full
+// un-sliced table. `table` borrows pointers into `result`'s tree, held
+// together in a struct to enforce lifetime coupling
+struct DecisionBasis {
+  ExprPtr result;
+  std::optional<TableView> table;
+};
+
+// Re-evaluates `inner` from its raw json, 
+// returns an empty DecisionBasis on any failure
+DecisionBasis evaluateDecisionBasis(const json& inner, QueryFormat format) {
+  std::string error;
+  ExprPtr expr = parseExpression(inner, format, error);
+  if(!expr) return {};
+  DecisionBasis basis;
+  try {
+    // BOSSEvaluate consumes its input expression
+    basis.result.reset(BOSSEvaluate(expr.release()));
+    basis.table = extractTable(basis.result.get());
+  } catch(...) {
+    return {};
+  }
+  return basis;
+}
+
+// Auto mode: pick the layout, serve it, and log how it was delivered
+std::string serveAuto(const BOSSExpression* result, const ServerConfig& config,
+                      TaskHint task, size_t labelOffset,
+                      const TableView* decisionBasis, const LogLevel& logLevel) {
+  std::optional<TableView> table = extractTable(result);
+  if(!table) return toTypedColumnarJson(result).dump();
+
+  LayoutDecision decision = chooseLayout(*table, config.cost, task, labelOffset, decisionBasis);
+
+  switch(decision.delivery) {
+    case Delivery::Oversized:
+      // Not even a single row fits within a page, still send the whole result
+      logMessage(logLevel, LogLevel::Warn,
+                 "result is " + std::to_string(decision.text.size()) +
+                     " characters, over the serving budget of " +
+                     std::to_string(config.cost.budgetChars) +
+                     "; the host may persist it to disk rather than return it inline");
+      break;
+    case Delivery::Paged:
+      // The intended outcome of a query result that doesn't fit within the
+      // tool output cap: served as a bounded first page instead
+      logMessage(logLevel, LogLevel::Info,
+                 "result paginated to fit serving budget of " +
+                     std::to_string(config.cost.budgetChars) + " characters");
+      break;
+    case Delivery::Whole:
+      break;
+  }
+  return std::move(decision.text);
+}
+
+
 json handleToolsCall(const json& params, const LogLevel& logLevel,
                      const ServerConfig& config) {
 
@@ -161,77 +219,27 @@ json handleToolsCall(const json& params, const LogLevel& logLevel,
     return toolResponse(error, true);
   }
 
-  // Captured before BOSSEvaluate consumes the expression
-  // If the agent calls for Slice(inner, offset, count),
-  // IndexedColumnarJson's row labels should continue from that offset
-  // rather than restarting at 0
-  const size_t labelOffset = detectSliceOffset(expression.get()).value_or(0);
+  // A top-level Slice(inner, offset, count) is detected as an agent's paging
+  // follow-up. Its offset keeps IndexedColumnarJson's row labels continuing
+  // and prevents the layout from flipping mid-retrieval (under auto mode)
+  const auto slice = detectSlice(arguments["expression"], config.queryFormat);
+  const size_t labelOffset = slice ? slice->offset : 0;
 
-  // On a follow-up Slice, cost the layout against the full inner table
-  // rather than the truncated page this call returns
-  // Otherwise the winning format can change mid-retrieval
-  ExprPtr innerResult;
-  std::optional<ColumnData> decisionTable;
-  if(auto innerJson = detectSliceInnerJson(arguments["expression"], config.queryFormat)) {
-    std::string innerError;
-    if(ExprPtr innerExpr = parseExpression(*innerJson, config.queryFormat, innerError)) {
-      try {
-        innerResult.reset(BOSSEvaluate(innerExpr.release()));
-        decisionTable = extractTable(innerResult.get());
-      } catch(...) {
-        // If re-evaluating `inner` fails for any reason, fall back
-        // to costing against the actually-served (sliced) table
-        innerResult.reset();
-        decisionTable.reset();
-      }
-    }
+  DecisionBasis basis;
+  if(slice && config.resultFormat == ResultFormat::Auto) {
+    basis = evaluateDecisionBasis(slice->inner, config.queryFormat);
   }
 
   std::string resultText;
-  std::string layoutNote;
 
   try {
     // BOSSEvaluate consumes its input expression.
     ExprPtr result(BOSSEvaluate(expression.release()));
 
     if(config.resultFormat == ResultFormat::Auto) {
-      // Auto resolves per query, on the materialized result. A non-Table (a
-      // scalar, an error expression) has no layout to choose between and falls
-      // through to the general typed encoding, same as every fixed format does.
-      if(std::optional<ColumnData> table = extractTable(result.get())) {
-        CostConfig costConfig;
-        costConfig.budgetChars = config.maxResultSizeChars;
-        costConfig.defaultThinking = config.defaultThinking;
-        
-        LayoutDecision decision =
-            chooseLayout(*table, costConfig,
-                         parseTaskHint(arguments.value("response_intent", "")),
-                         labelOffset, decisionTable ? &*decisionTable : nullptr);
-
-        const Delivery delivery = decision.delivery;
-        resultText = std::move(decision.text);
-        switch(delivery) {
-          case Delivery::Oversized:
-            // Not even a single row fits within a page, still send the whole result
-            layoutNote = "result is " + std::to_string(resultText.size()) +
-                         " characters, over the advertised budget of " +
-                         std::to_string(config.maxResultSizeChars) +
-                         "; the host may persist it to disk rather than return it inline";
-            break;
-          case Delivery::Paged:
-            // The intended outcome of a query result that doesn't fit
-            // within tool token cap, served as a bounded first page instead
-            // of the full result
-            logMessage(logLevel, LogLevel::Info,
-                       "result paginated to fit budget of " +
-                           std::to_string(config.maxResultSizeChars) + " characters");
-            break;
-          case Delivery::Whole:
-            break;
-        }
-      } else {
-        resultText = toTypedColumnarJson(result.get()).dump();
-      }
+      resultText = serveAuto(result.get(), config,
+                             parseTaskHint(arguments.value("response_intent", "")),
+                             labelOffset, basis.table ? &*basis.table : nullptr, logLevel);
     } else {
       resultText = expressionToJson(result.get(), config.resultFormat, labelOffset).dump();
     }
@@ -242,9 +250,6 @@ json handleToolsCall(const json& params, const LogLevel& logLevel,
   }
 
   logMessage(logLevel, LogLevel::Debug, "Evaluated expression using boss_evaluate");
-  if(!layoutNote.empty()) {
-    logMessage(logLevel, LogLevel::Warn, layoutNote);
-  }
   return toolResponse(resultText, false);
 }
 
@@ -263,6 +268,10 @@ bool handleRequest(const json& request, LogLevel& logLevel, const ServerConfig& 
 
   const json id = request["id"];
 
+  // Null unless present and an object
+  const json* params = (request.contains("params") && request["params"].is_object())
+                           ? &request["params"] : nullptr;
+
   if(method == "shutdown") {
     sendResponse(makeResult(id, nullptr));
     return true;
@@ -270,11 +279,8 @@ bool handleRequest(const json& request, LogLevel& logLevel, const ServerConfig& 
 
   if(method == "initialize") {
     std::string protocolVersion = defaultProtocolVersion;
-    if(request.contains("params") && request["params"].is_object()) {
-      const json& params = request["params"];
-      if(params.contains("protocolVersion") && params["protocolVersion"].is_string()) {
-        protocolVersion = params["protocolVersion"].get<std::string>();
-      }
+    if(params && params->contains("protocolVersion") && (*params)["protocolVersion"].is_string()) {
+      protocolVersion = (*params)["protocolVersion"].get<std::string>();
     }
     json result;
     result["protocolVersion"] = protocolVersion;
@@ -285,9 +291,7 @@ bool handleRequest(const json& request, LogLevel& logLevel, const ServerConfig& 
   }
 
   if(method == "logging/setLevel") {
-    if(request.contains("params") && request["params"].is_object()) {
-      logLevel = parseLogLevel(request["params"].value("level", "info"));
-    }
+    if(params) logLevel = parseLogLevel(params->value("level", "info"));
     sendResponse(makeResult(id, json::object()));
     return false;
   }
@@ -298,11 +302,11 @@ bool handleRequest(const json& request, LogLevel& logLevel, const ServerConfig& 
   }
 
   if(method == "tools/call") {
-    if(!request.contains("params") || !request["params"].is_object()) {
+    if(!params) {
       sendResponse(makeError(-32602, "Missing params", id));
       return false;
     }
-    sendResponse(makeResult(id, handleToolsCall(request["params"], logLevel, config)));
+    sendResponse(makeResult(id, handleToolsCall(*params, logLevel, config)));
     return false;
   }
 

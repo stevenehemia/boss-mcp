@@ -9,6 +9,7 @@ add_executable(boss_mcp
 	src/logger.cpp
 	src/handlers.cpp
 	src/expression.cpp
+	src/layouter.cpp
 )
 
 target_include_directories(boss_mcp PRIVATE

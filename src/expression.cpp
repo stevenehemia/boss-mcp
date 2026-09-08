@@ -9,7 +9,6 @@
 #include "BOSS.h"
 #include "nlohmann/json.hpp"
 
-extern "C" char const* bossSymbolToNewString(struct BOSSSymbol const* arg);
 
 using json = nlohmann::json;
 
@@ -53,6 +52,20 @@ ExprPtr buildComplex(const std::string& headName, std::vector<ExprPtr>& args) {
   }
   // newComplexBOSSExpression copies its inputs; head and args free on return.
   return ExprPtr(newComplexBOSSExpression(head.get(), raw.size(), raw.data()));
+}
+
+// Parse each argument json in args[first..] via `parseArg`,
+// bail on the first failure, then build the Complex node.
+ExprPtr parseCall(const std::string& headName, const json& args, size_t first,
+                  ExprPtr (*parseArg)(const json&, std::string&), std::string& error) {
+  std::vector<ExprPtr> parsed;
+  parsed.reserve(args.size() - first);
+  for(size_t i = first; i < args.size(); ++i) {
+    ExprPtr arg = parseArg(args[i], error);
+    if(!arg) return nullptr;
+    parsed.push_back(std::move(arg));
+  }
+  return buildComplex(headName, parsed);
 }
 
 
@@ -180,15 +193,7 @@ ExprPtr parseArrayJsonExpression(const json& value, std::string& error) {
     return nullptr;
   }
 
-  std::vector<ExprPtr> args;
-  args.reserve(value.size() - 1);
-  for(size_t i = 1; i < value.size(); ++i) {
-    ExprPtr arg = parseArrayJsonExpression(value[i], error);
-    if(!arg) return nullptr;
-    args.push_back(std::move(arg));
-  }
-
-  return buildComplex(headName, args);
+  return parseCall(headName, value, 1, parseArrayJsonExpression, error);
 }
 
 // Returns the "value" field if present and ok(value) holds; otherwise sets
@@ -271,14 +276,8 @@ ExprPtr parseObjectJsonExpression(const json& value, std::string& error) {
       error = "call expression requires array args";
       return nullptr;
     }
-    std::vector<ExprPtr> args;
-    args.reserve(value["args"].size());
-    for(const auto& arg : value["args"]) {
-      ExprPtr expr = parseObjectJsonExpression(arg, error);
-      if(!expr) return nullptr;
-      args.push_back(std::move(expr));
-    }
-    return buildComplex(value["head"].get<std::string>(), args);
+    return parseCall(value["head"].get<std::string>(), value["args"], 0,
+                     parseObjectJsonExpression, error);
   }
 
   error = "unsupported expression type";
@@ -360,7 +359,7 @@ json cellToPlainJson(const BOSSExpression* expression, bool dateCol) {
 }
 
 // The cell at (row r, column c) as a plain JSON value.
-json cellAt(const ColumnData& d, size_t r, size_t c) {
+json cellAt(const TableView& d, size_t r, size_t c) {
   if(r >= d.heights[c]) return json(nullptr);
   return cellToPlainJson(d.cells[c].get()[r], d.dateCols[c]);
 }
@@ -368,7 +367,7 @@ json cellAt(const ColumnData& d, size_t r, size_t c) {
 // Pivot the columnar BOSS Table expression
 // Table[ col1[v...], col2[v...], ... ] into row-major records
 // [{"col1": v, "col2": v, ...}, ...]
-json tableToArrayOfObjectsJson(const ColumnData& d, size_t begin, size_t end) {
+json tableToArrayOfObjectsJson(const TableView& d, size_t begin, size_t end) {
   json rows = json::array();
   rows.get_ref<json::array_t&>().reserve(end - begin);
 
@@ -387,7 +386,7 @@ json tableToArrayOfObjectsJson(const ColumnData& d, size_t begin, size_t end) {
 //                ["col1", v1, v2, ...], ["col2", v1, v2, ...], ...
 // indexed=true   IndexedColumnarJson -- the same, but each cell paired with
 //                ["col1", [0, v0], [1, v1], ...], ... --
-json tableToColumnarJson(const ColumnData& d, size_t begin, size_t end, bool indexed,
+json tableToColumnarJson(const TableView& d, size_t begin, size_t end, bool indexed,
                           size_t labelOffset = 0) {
   json cols = json::array();
   cols.get_ref<json::array_t&>().reserve(d.ncols);
@@ -411,7 +410,7 @@ json tableToColumnarJson(const ColumnData& d, size_t begin, size_t end, bool ind
 
 // PositionalRowsJson: schema declared once, then rows as tuples
 // ["Schema", "col1", "col2", ...], [v1, v2, ...], ... --
-json tableToPositionalRowsJson(const ColumnData& d, size_t begin, size_t end) {
+json tableToPositionalRowsJson(const TableView& d, size_t begin, size_t end) {
   json schema = json::array();
   schema.get_ref<json::array_t&>().reserve(d.ncols + 1);
   schema.push_back("Schema");
@@ -445,7 +444,7 @@ json toTypedColumnarJson(const BOSSExpression* expression) {
 }
 
 
-std::optional<ColumnData> extractTable(const BOSSExpression* expression) {
+std::optional<TableView> extractTable(const BOSSExpression* expression) {
   // Nullopt -- and the caller falls back to toTypedColumnarJson -- if this
   // isn't a Table at all, or is one whose columns aren't all Complex.
   if(getBOSSExpressionTypeID(expression) != TypeID::Complex ||
@@ -453,7 +452,7 @@ std::optional<ColumnData> extractTable(const BOSSExpression* expression) {
     return std::nullopt;
   }
 
-  ColumnData out;
+  TableView out;
   out.ncols = getArgumentCountFromBOSSExpression(expression);
   ArgsPtr colArgs(getArgumentsFromBOSSExpression(expression));
   out.names.resize(out.ncols);
@@ -474,23 +473,17 @@ std::optional<ColumnData> extractTable(const BOSSExpression* expression) {
 }
 
 
-json serializeTable(const ColumnData& data, ResultFormat format, size_t rowOffset,
+json serializeTable(const TableView& data, ResultFormat format, size_t rowOffset,
                     size_t rowCount, size_t labelOffset) {
   const size_t begin = std::min(rowOffset, data.nrows);
-  // Clamp the COUNT against what remains rather than clamping begin+rowCount:
-  // the latter wraps for a large rowCount (e.g. the natural "everything from
-  // here" idiom, rowCount = SIZE_MAX), yielding end < begin and an end-begin
-  // underflow in the serializers' reserve() calls.
   const size_t end = begin + std::min(rowCount, data.nrows - begin);
   switch(format) {
     case ResultFormat::IndexedColumnarJson: return tableToColumnarJson(data, begin, end, true, labelOffset);
     case ResultFormat::PositionalRowsJson: return tableToPositionalRowsJson(data, begin, end);
     case ResultFormat::ArrayOfObjectsJson: return tableToArrayOfObjectsJson(data, begin, end);
-    // Neither of these is a table layout: TypedColumnarJson is the general
-    // expression encoding, and Auto is a request-time mode the caller should
-    // have resolved to a concrete format already. Both fall back to plain
-    // columnar rather than being rejected, so a caller can't accidentally get
-    // no output at all.
+    // TypedColumnarJson is the general encoding, N/A for output
+    // Auto should have resolved to concrete format already
+    // Both fall back to plain columnar
     case ResultFormat::ColumnarJson:
     case ResultFormat::TypedColumnarJson:
     case ResultFormat::Auto: break;
@@ -499,41 +492,40 @@ json serializeTable(const ColumnData& data, ResultFormat format, size_t rowOffse
 }
 
 
-// Slice(<inner>, ["Int", offset], ["Int", count]) parses into a Complex node
-// whose second argument is a leaf TypeID::Int node (not a nested wrapper)
-std::optional<size_t> detectSliceOffset(const BOSSExpression* expression) {
-  if(getBOSSExpressionTypeID(expression) != TypeID::Complex) return std::nullopt;
-  if(getHeadName(expression) != "Slice") return std::nullopt;
-  if(getArgumentCountFromBOSSExpression(expression) != 3) return std::nullopt;
-  ArgsPtr args(getArgumentsFromBOSSExpression(expression));
-  const BOSSExpression* offsetArg = args.get()[1];
-  if(getBOSSExpressionTypeID(offsetArg) != TypeID::Int) return std::nullopt;
-  const int32_t offset = getIntValueFromBOSSExpression(offsetArg);
-  if(offset < 0) return std::nullopt;
-  return static_cast<size_t>(offset);
-}
+std::optional<SliceParts> detectSlice(const json& value, QueryFormat format) {
+  const json* inner = nullptr;
+  const json* offset = nullptr;
 
-
-// Same detection as detectSliceOffset, but returns the RAW JSON for `inner`
-// (the pre-Slice portion) instead of the offset
-std::optional<json> detectSliceInnerJson(const json& value, QueryFormat format) {
   if(format == QueryFormat::ArrayJson) {
+    // ["Slice", <inner>, ["Int", offset], ["Int", count]]
     if(!value.is_array() || value.size() != 4) return std::nullopt;
     if(!value[0].is_string() || value[0].get<std::string>() != "Slice") return std::nullopt;
     if(!value[2].is_array() || value[2].size() != 2 || !value[2][0].is_string() ||
        value[2][0].get<std::string>() != "Int") {
       return std::nullopt;
     }
-    return value[1];
+    inner = &value[1];
+    offset = &value[2][1];
+  } else {
+    // {"type":"call","head":"Slice","args":[<inner>, {"type":"int","value":offset}, <count>]}
+    if(!value.is_object() || value.value("type", "") != "call") return std::nullopt;
+    if(value.value("head", "") != "Slice") return std::nullopt;
+    if(!value.contains("args") || !value["args"].is_array() || value["args"].size() != 3) {
+      return std::nullopt;
+    }
+    const json& args = value["args"];
+    if(!args[1].is_object() || args[1].value("type", "") != "int" ||
+       !args[1].contains("value")) {
+      return std::nullopt;
+    }
+    inner = &args[0];
+    offset = &args[1]["value"];
   }
-  if(!value.is_object() || value.value("type", "") != "call") return std::nullopt;
-  if(value.value("head", "") != "Slice") return std::nullopt;
-  if(!value.contains("args") || !value["args"].is_array() || value["args"].size() != 3) {
-    return std::nullopt;
-  }
-  const json& args = value["args"];
-  if(!args[1].is_object() || args[1].value("type", "") != "int") return std::nullopt;
-  return args[0];
+
+  if(!offset->is_number_integer()) return std::nullopt;
+  const int64_t raw = offset->get<int64_t>();
+  if(raw < 0) return std::nullopt;
+  return SliceParts{*inner, static_cast<size_t>(raw)};
 }
 
 
@@ -541,7 +533,7 @@ json expressionToJson(const BOSSExpression* expression, ResultFormat format, siz
   // Every format but TypedColumnarJson is only defined for a well-formed Table.
   // Anything else falls through to the typed form
   if(format != ResultFormat::TypedColumnarJson) {
-    if(std::optional<ColumnData> d = extractTable(expression)) {
+    if(std::optional<TableView> d = extractTable(expression)) {
       return serializeTable(*d, format, 0, d->nrows, labelOffset);
     }
   }

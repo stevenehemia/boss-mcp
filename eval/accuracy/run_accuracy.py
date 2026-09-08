@@ -184,6 +184,7 @@ def run(args):
                         "target": task_instance["target"],
                         "expected": task_instance["expected"],
                         "raw": text,
+                        "thinking_enabled": bool(args.thinking and MODELS[args.model]["thinking"]),
                         "thinking": thinking,
                         "answer": answer,
                         "correct": scorelib.score(task_instance["task"], answer, task_instance["expected"]),

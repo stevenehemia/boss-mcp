@@ -48,20 +48,31 @@ DAYS_REL_TOL = 0.05
 
 
 def _parse_stream(text, path):
-    """Last `{"type": "result"}` line of a transcript"""
-    for line in reversed(text.splitlines()):
+    """The `{"type": "result"}` summary of a transcript.
+
+    Kept in step with runfile.py's copy. A session interrupted by a rate limit
+    and resumed leaves SEVERAL result messages, because the runner appends each
+    resumed transcript to the same file. `modelUsage` (what extract() reads) is
+    cumulative and so correct in any of them, but `num_turns` is per segment and
+    is summed here into `num_turns_total`."""
+    segments = []
+    for line in text.splitlines():
         line = line.strip()
         if not line:
             continue
         try:
             msg = json.loads(line)
         except json.JSONDecodeError:
-            # A line might be truncated,
-            # keep scanning back for the last intact message.
+            # A line might be truncated; keep scanning for intact messages.
             continue
         if isinstance(msg, dict) and msg.get("type") == "result":
-            return msg
-    raise ValueError(f"{path}: stream transcript has no result message.")
+            segments.append(msg)
+    if not segments:
+        raise ValueError(f"{path}: stream transcript has no result message.")
+    out = dict(segments[-1])
+    out["num_turns_total"] = sum(m.get("num_turns", 0) for m in segments)
+    out["n_segments"] = len(segments)
+    return out
 
 
 def load_run(path):
@@ -233,7 +244,7 @@ def extract(path):
     denials = d.get("permission_denials", []) or []
     return {
         "ok": not d.get("is_error", False),
-        "turns": d.get("num_turns", 0),
+        "turns": d.get("num_turns_total", d.get("num_turns", 0)),
         "cost": d.get("total_cost_usd", 0.0),
         "cache_read": cr,
         "out": s("outputTokens"),

@@ -61,10 +61,10 @@ nlohmann::json expressionToJson(const BOSSExpression* expression, ResultFormat f
 // Callers fall back to toTypedColumnarJson, which represents everything.
 std::optional<TableView> extractTable(const BOSSExpression* expression);
 
-// Serializes rows [rowOffset, rowOffset + rowCount) of `data` in the given format
+// Serialises rows [rowOffset, rowOffset + rowCount) of `data` in the given format
 // TypedColumnarJson is treated as ColumnarJson if passed as it is the general
 // expression encoding, not a table layout
-nlohmann::json serializeTable(const TableView& data, ResultFormat format,
+nlohmann::json serialiseTable(const TableView& data, ResultFormat format,
                               size_t rowOffset, size_t rowCount, size_t labelOffset = 0);
 
 // BOSS's native expression representation - the fallback for any non-Table.

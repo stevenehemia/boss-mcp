@@ -473,7 +473,7 @@ std::optional<TableView> extractTable(const BOSSExpression* expression) {
 }
 
 
-json serializeTable(const TableView& data, ResultFormat format, size_t rowOffset,
+json serialiseTable(const TableView& data, ResultFormat format, size_t rowOffset,
                     size_t rowCount, size_t labelOffset) {
   const size_t begin = std::min(rowOffset, data.nrows);
   const size_t end = begin + std::min(rowCount, data.nrows - begin);
@@ -534,7 +534,7 @@ json expressionToJson(const BOSSExpression* expression, ResultFormat format, siz
   // Anything else falls through to the typed form
   if(format != ResultFormat::TypedColumnarJson) {
     if(std::optional<TableView> d = extractTable(expression)) {
-      return serializeTable(*d, format, 0, d->nrows, labelOffset);
+      return serialiseTable(*d, format, 0, d->nrows, labelOffset);
     }
   }
   return toTypedColumnarJson(expression);

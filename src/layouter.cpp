@@ -11,7 +11,7 @@ namespace {
 // withheld from THIS call's evaluation
 json pageEnvelope(const TableView& table, ResultFormat format, size_t count, size_t labelOffset) {
   json envelope;
-  envelope["table"] = serializeTable(table, format, 0, count, labelOffset);
+  envelope["table"] = serialiseTable(table, format, 0, count, labelOffset);
   envelope["overbudget_row_count"] = table.nrows - count;
   return envelope;
 }
@@ -139,7 +139,7 @@ LayoutDecision chooseLayout(const TableView& table, const CostConfig& config, Ta
   rendered.reserve(config.candidates.size());
   for(ResultFormat format : config.candidates) {
     rendered.push_back(
-        {format, serializeTable(costTable, format, 0, costTable.nrows, labelOffset).dump()});
+        {format, serialiseTable(costTable, format, 0, costTable.nrows, labelOffset).dump()});
   }
 
   // accuracy_penalty: cost of the most reliable format multiplied by
@@ -173,7 +173,7 @@ LayoutDecision chooseLayout(const TableView& table, const CostConfig& config, Ta
   // unavoidable second serialisation.
   std::string winnerText = (decisionBasis == nullptr)
       ? std::move(rendered[winnerIndex].text)
-      : serializeTable(table, winnerFormat, 0, table.nrows, labelOffset).dump();
+      : serialiseTable(table, winnerFormat, 0, table.nrows, labelOffset).dump();
   const size_t winnerSize = winnerText.size();
 
   if(config.budgetChars == 0 || winnerSize <= config.budgetChars) {

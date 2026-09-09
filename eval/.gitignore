@@ -20,7 +20,6 @@ accuracy/.venv/
 accuracy/results*/
 accuracy/reports/
 accuracy/*.json*
-accuracy/system_prompt.txt
 
 # token_cost evaluation outputs
 token_cost/results*/

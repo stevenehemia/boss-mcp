@@ -225,7 +225,7 @@ def _wait_for(proc, req_id):
 
 
 @contextmanager
-def boss_session(query_format="arrayjson", result_format="columnarjson"):
+def boss_session(query_format="arrayjson", result_format="typedcolumnarjson"):
     """Start boss_mcp, perform handshake, yield (proc, req_id_generator).
 
     The default matches the pre-split ExpressionJSON flow. Pass explicit

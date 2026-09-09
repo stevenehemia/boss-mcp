@@ -107,11 +107,14 @@ def _read(proc):
 
 
 @contextmanager
-def session(query_format="arrayjson", result_format="columnarjson", mem_limit_kb=MEM_LIMIT_KB):
-    """Launch boss_mcp with the given formats (capped), do the handshake, yield (proc, id_gen)."""
+def session(query_format="arrayjson", result_format="typedcolumnarjson",
+            mem_limit_kb=MEM_LIMIT_KB, extra_args=()):
+    """Launch boss_mcp with the given formats.
+    extra_args: additional boss_mcp CLI flags, e.g. --max-result-size-chars=6000"""
+    extra = (" " + " ".join(extra_args)) if extra_args else ""
     launch = ["bash", "-c",
               f"ulimit -v {mem_limit_kb}; exec {BOSS_EXE} "
-              f"--query-format={query_format} --result-format={result_format}"]
+              f"--query-format={query_format} --result-format={result_format}{extra}"]
     proc = subprocess.Popen(launch, stdin=subprocess.PIPE,
                             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
     ids = count(1)
@@ -132,11 +135,23 @@ def session(query_format="arrayjson", result_format="columnarjson", mem_limit_kb
             proc.kill()
 
 
-def evaluate(proc, ids, expression) -> str:
-    """One boss_evaluate call; returns the result text (may be an error expression)."""
+def list_tools(proc, ids):
+    """Construct and send tools/list request to boss_mcp"""
     rid = next(ids)
+    _send(proc, {"jsonrpc": "2.0", "id": rid, "method": "tools/list", "params": {}})
+    while (m := _read(proc)) and m.get("id") != rid:
+        pass
+    return m["result"]["tools"]
+
+
+def evaluate(proc, ids, expression, response_intent=None) -> str:
+    """Construct and send one boss_evaluate call."""
+    rid = next(ids)
+    arguments = {"expression": expression}
+    if response_intent:
+        arguments["response_intent"] = response_intent
     _send(proc, {"jsonrpc": "2.0", "id": rid, "method": "tools/call",
-                 "params": {"name": "boss_evaluate", "arguments": {"expression": expression}}})
+                 "params": {"name": "boss_evaluate", "arguments": arguments}})
     while (m := _read(proc)) and m.get("id") != rid:
         pass
     return m["result"]["content"][0]["text"]
@@ -144,7 +159,7 @@ def evaluate(proc, ids, expression) -> str:
 
 # ── convenience: one query, one shot ─────────────────────────────────────────────
 
-def fetch(expression, query_format="arrayjson", result_format="columnarjson") -> str:
+def fetch(expression, query_format="arrayjson", result_format="typedcolumnarjson") -> str:
     """Raw server output bytes for one query (byte-exact for the native formats)."""
     with session(query_format, result_format) as (proc, ids):
         return evaluate(proc, ids, expression)
@@ -152,4 +167,4 @@ def fetch(expression, query_format="arrayjson", result_format="columnarjson") ->
 
 def fetch_table(expression, query_format="arrayjson") -> Table:
     """The query's result as a neutral Table (parsed from the server's columnar output)."""
-    return parse_columnar(fetch(expression, query_format, "columnarjson"))
+    return parse_columnar(fetch(expression, query_format, "typedcolumnarjson"))

@@ -5,6 +5,8 @@ Token cost of every result format, per tokenizer, with no agent in the loop.
 Query sets:
   shapes  8 queries: 4 response shapes x short/long column names
   tiers   eval/efficiency's size ladder (~60-600 rows, ~5k-183k chars)
+  grid    32 queries: row count stepped ~geometrically 5..500 x (5|10 cols)
+          x short/long column names, all prefixes of one dense ITA window
 
   shape        query
   scalar       global mean of 1 metric                      (1 row x 1 col)
@@ -19,6 +21,7 @@ Usage (from eval/token_cost/):
     ./measure.py   # shapes, tiktoken only
     ./measure.py --claude-models claude-sonnet-5 claude-haiku-4-5
     ./measure.py --queries tiers --claude-models claude-sonnet-5
+    ./measure.py --queries grid
     ./measure.py --tiktoken-encodings gpt-4
 
 Output (tag names the query set and the tokenizers measured):
@@ -31,7 +34,7 @@ import json
 import os
 import sys
 from contextlib import ExitStack
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from functools import partial
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -69,6 +72,28 @@ LONG_METRICS = [
     "new_vaccinations_smoothed_per_million",
     "new_people_vaccinated_smoothed_per_hundred",
     "total_boosters_per_hundred",
+]
+
+GRID_ROWS = (5, 10, 20, 50, 100, 200, 350, 500)
+
+GRID_CODE, GRID_START = "ITA", "2020-12-17"
+
+GRID_SHORT_METRICS = [
+    "new_cases", "new_deaths", "total_cases", "total_deaths",
+    "hosp_patients", "icu_patients", "new_tests", "total_tests",
+    "positive_rate",
+]
+
+GRID_LONG_METRICS = [
+    "new_cases_per_million",
+    "new_deaths_per_million",
+    "new_cases_smoothed_per_million",
+    "new_deaths_smoothed_per_million",
+    "total_cases_per_million",
+    "total_deaths_per_million",
+    "hosp_patients_per_million",
+    "icu_patients_per_million",
+    "total_tests_per_thousand",
 ]
 
 
@@ -119,6 +144,37 @@ def _shape_queries():
     return queries
 
 
+def _window_select(code, start, n_rows, metrics):
+    """First n_rows days of a dense per-country window: the tiers set's query
+    shape (Filter on code and date, Project date + metrics), sized by the
+    exclusive end date rather than Slice so the grid varies size through the
+    same mechanism as the calibration corpus."""
+    end = (date.fromisoformat(start) + timedelta(days=n_rows + 1)).isoformat()
+    return ["Project",
+               ["Filter",
+                   ["Filter", ["Load", ["String", DATA_PATH]],
+                       ["Equal", ["Symbol", "code"], ["String", code]]],
+                   ["And", ["Greater", ["Symbol", "date"], ["String", start]],
+                           ["Less", ["Symbol", "date"], ["String", end]]]],
+               ["Symbol", "date"], *[["Symbol", m] for m in metrics]]
+
+
+def _grid_queries():
+    queries = []
+    for length, metrics in (("short", GRID_SHORT_METRICS), ("long", GRID_LONG_METRICS)):
+        for cols, ms in ((5, metrics[:4]), (10, metrics)):
+            for n in GRID_ROWS:
+                queries.append({
+                    "id": f"{n}x{cols}-{length}", "shape": f"{n}x{cols}",
+                    "name_length": length,
+                    "description": f"First {n} days of the dense {GRID_CODE} "
+                                   f"window, date + {len(ms)} metrics, "
+                                   f"{length} column names",
+                    "expect_rows": n,
+                    "boss_query": _window_select(GRID_CODE, GRID_START, n, ms)})
+    return queries
+
+
 def _tier_queries():
     sys.path.insert(0, os.path.join(os.path.dirname(_HERE), "efficiency"))
     from questions import METRICS, WINDOWS
@@ -130,7 +186,8 @@ def _tier_queries():
             for code, start, end in [WINDOWS[tier]]]
 
 
-QUERY_SETS = {"shapes": _shape_queries, "tiers": _tier_queries}
+QUERY_SETS = {"shapes": _shape_queries, "tiers": _tier_queries,
+              "grid": _grid_queries}
 
 
 def measure_query(q, sessions, tokenizers) -> dict:
@@ -148,6 +205,10 @@ def measure_query(q, sessions, tokenizers) -> dict:
     # identify actual row and column counts from positional payload
     data = json.loads(served["positional_rows"])
     rows, cols = len(data) - 1, len(data[0]) - 1
+    if q.get("expect_rows") is not None and rows != q["expect_rows"]:
+        raise RuntimeError(f"{q['id']}: expected {q['expect_rows']} rows, got "
+                           f"{rows} -- a gap in the window would bend the "
+                           "grid's row-count axis, so refuse to measure it")
 
     counts = {}
     for tok_label, count in tokenizers.items():
@@ -173,7 +234,7 @@ def write_report(trials, path):
     ]
     for t in trials:
         lines += ["", "-" * 72,
-                  f"{t['id']:9s} [{t['shape']}/{t['name_length']}]  {t['description']}",
+                  f"{t['id']:12s} [{t['shape']}/{t['name_length']}]  {t['description']}",
                   f"  rows={t['rows']} cols={t['cols']}"]
         for tok_label, by_format in t["tokenizers"].items():
             lines.append(f"  [{tok_label}]")
@@ -214,7 +275,7 @@ def main():
         sessions = {label: stack.enter_context(boss_session(result_format=fmt))
                     for label, fmt in FORMATS.items()}
         for q in QUERY_SETS[args.queries]():
-            print(f"{q['id']:9s} [{q['shape']}/{q['name_length']}] ...", end=" ", flush=True)
+            print(f"{q['id']:12s} [{q['shape']}/{q['name_length']}] ...", end=" ", flush=True)
             result = measure_query(q, sessions, tokenizers)
             trials.append(result)
             print(f"rows={result['rows']} cols={result['cols']}")

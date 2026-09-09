@@ -48,13 +48,7 @@ DAYS_REL_TOL = 0.05
 
 
 def _parse_stream(text, path):
-    """The `{"type": "result"}` summary of a transcript.
-
-    Kept in step with runfile.py's copy. A session interrupted by a rate limit
-    and resumed leaves SEVERAL result messages, because the runner appends each
-    resumed transcript to the same file. `modelUsage` (what extract() reads) is
-    cumulative and so correct in any of them, but `num_turns` is per segment and
-    is summed here into `num_turns_total`."""
+    """The `{"type": "result"}` summary of a transcript"""
     segments = []
     for line in text.splitlines():
         line = line.strip()

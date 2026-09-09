@@ -28,7 +28,7 @@ enum class ResultFormat {
   PositionalRowsJson, ArrayOfObjectsJson, Auto
 };
 
-// Pivoted view over a BOSS Table expression
+// Non-owning view over a BOSS Table expression
 struct TableView {
   std::vector<std::string> names;
   std::vector<bool> dateCols;

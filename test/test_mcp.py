@@ -6,9 +6,7 @@ import sys
 from typing import Optional
 
 
-# ---------------------------------------------------------------------------
-# MCP transport helpers
-# ---------------------------------------------------------------------------
+# == MCP transport helpers ====================================================
 
 def read_message(stream) -> Optional[dict]:
     content_length = None
@@ -49,9 +47,7 @@ def wait_for_response(proc, request_id: int) -> dict:
             return msg
 
 
-# ---------------------------------------------------------------------------
-# Protocol assertion helpers
-# ---------------------------------------------------------------------------
+# == Protocol assertion helpers ===============================================
 
 def assert_envelope(msg: dict, expected_id: int) -> None:
     """Every JSON-RPC 2.0 response must have jsonrpc, a matching id, and exactly
@@ -77,9 +73,7 @@ def assert_error_shape(error: dict, expected_code: int) -> None:
         f"expected error code {expected_code}, got {error['code']}: {error}"
 
 
-# ---------------------------------------------------------------------------
-# MCP session helpers
-# ---------------------------------------------------------------------------
+# == MCP session helpers ======================================================
 
 def handshake(proc, req_id: int) -> None:
     send_request(proc, {"jsonrpc": "2.0", "id": req_id, "method": "initialize", "params": {}})
@@ -99,7 +93,7 @@ def handshake(proc, req_id: int) -> None:
     send_request(proc, {"jsonrpc": "2.0", "method": "initialized"})
 
 
-def check_tools_list(proc, req_id: int, format_flag: str) -> None:
+def check_tools_list(proc, req_id: int, query_format: str) -> None:
     send_request(proc, {"jsonrpc": "2.0", "id": req_id, "method": "tools/list"})
     resp = wait_for_response(proc, req_id)
     assert_envelope(resp, req_id)
@@ -122,7 +116,7 @@ def check_tools_list(proc, req_id: int, format_flag: str) -> None:
     assert "expression" in schema.get("required", []), \
         f"'expression' must be in inputSchema.required: {schema}"
 
-    expected_expr_type = "array" if format_flag == "--format=expressionjson" else "object"
+    expected_expr_type = "array" if query_format == "arrayjson" else "object"
     actual_expr_type = props["expression"].get("type")
     assert actual_expr_type == expected_expr_type, \
         f"expression schema type: expected '{expected_expr_type}', got '{actual_expr_type}'"
@@ -137,8 +131,8 @@ def check_unknown_method(proc, req_id: int) -> None:
     assert_error_shape(resp["error"], expected_code=-32601)
 
 
-def check_invalid_expression(proc, req_id: int, format_flag: str) -> None:
-    invalid = [] if format_flag == "--format=expressionjson" else {"not": "valid"}
+def check_invalid_expression(proc, req_id: int, query_format: str) -> None:
+    invalid = [] if query_format == "arrayjson" else {"not": "valid"}
     send_request(proc, {
         "jsonrpc": "2.0",
         "id": req_id,
@@ -180,11 +174,9 @@ def evaluate(proc, expression, req_id: int) -> dict:
     return json.loads(content[0]["text"])
 
 
-# ---------------------------------------------------------------------------
-# Test cases
-# ---------------------------------------------------------------------------
+# == Test cases ===============================================================
 
-EXPRESSION_JSON_CASES = [
+ARRAY_JSON_CASES = [
     {
         "description": "Filter rows where A > 2",
         "input": ["Filter",
@@ -203,7 +195,7 @@ EXPRESSION_JSON_CASES = [
     },
 ]
 
-REGULAR_JSON_CASES = [
+OBJECT_JSON_CASES = [
     {
         "description": "Filter rows where A > 2",
         "input": {
@@ -222,14 +214,7 @@ REGULAR_JSON_CASES = [
                 ]},
             ],
         },
-        "expected": {
-            "type": "call", "head": "Table",
-            "args": [
-                {"type": "call", "head": "A", "args": [
-                    {"type": "long", "value": 3},
-                ]},
-            ],
-        },
+        "expected": ["Table", ["A", ["Integer", 3]]],
     },
     {
         "description": "Filter rows where 1 < A < 3 (And predicate)",
@@ -255,87 +240,78 @@ REGULAR_JSON_CASES = [
                 ]},
             ],
         },
-        "expected": {
-            "type": "call", "head": "Table",
-            "args": [
-                {"type": "call", "head": "A", "args": [
-                    {"type": "long", "value": 2},
-                ]},
-            ],
-        },
+        "expected": ["Table", ["A", ["Integer", 2]]],
     },
 ]
 
 
-# ---------------------------------------------------------------------------
-# Test runner
-# ---------------------------------------------------------------------------
+# == Test runner ==============================================================
 
-def run_format_test(exe: str, format_flag: str, cases: list) -> int:
-    print(f"\n=== {format_flag} ===")
+PROTOCOL_CHECKS_PER_FORMAT = 4
+
+def run_format_test(exe: str, query_format: str, cases: list) -> int:
+    """Run the protocol checks and `cases` against one server; returns the
+    number that passed"""
+    print(f"\n=== --query-format={query_format} ===")
     proc = subprocess.Popen(
-        [exe, format_flag],
+        [exe, f"--query-format={query_format}", "--result-format=typedcolumnarjson"],
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
     )
-    failed = 0
+    passed = 0
     try:
         req_id = 1
         protocol_checks = [
             ("initialize response structure",  lambda: handshake(proc, req_id)),
-            ("tools/list schema",              lambda: check_tools_list(proc, req_id + 1, format_flag)),
+            ("tools/list schema",              lambda: check_tools_list(proc, req_id + 1, query_format)),
             ("unknown method returns -32601",  lambda: check_unknown_method(proc, req_id + 2)),
-            ("invalid expression returns error", lambda: check_invalid_expression(proc, req_id + 3, format_flag)),
+            ("invalid expression returns error", lambda: check_invalid_expression(proc, req_id + 3, query_format)),
         ]
         for description, check in protocol_checks:
             try:
                 check()
                 print(f"  PASS  {description}")
+                passed += 1
             except AssertionError as e:
                 print(f"  FAIL  {description}: {e}")
-                failed += 1
 
         for i, case in enumerate(cases):
             try:
                 result = evaluate(proc, case["input"], req_id=req_id + 4 + i)
                 if result == case["expected"]:
                     print(f"  PASS  {case['description']}")
+                    passed += 1
                 else:
                     print(f"  FAIL  {case['description']}")
                     print(f"        expected: {json.dumps(case['expected'])}")
                     print(f"        got:      {json.dumps(result)}")
-                    failed += 1
             except AssertionError as e:
                 print(f"  FAIL  {case['description']}: {e}")
-                failed += 1
 
     except RuntimeError as e:
         print(f"  FAIL  Server error: {e}")
-        failed += 1
     finally:
         if proc.stdin:
             proc.stdin.close()
         proc.terminate()
         proc.wait(timeout=2)
 
-    return failed
+    return passed
 
 
 def main() -> int:
     here = os.path.dirname(os.path.abspath(__file__))
     exe = os.path.abspath(os.path.join(here, "..", "build", "boss_mcp"))
+    if not os.path.exists(exe):
+        print(f"error: {exe} not found; run ./build.sh first", file=sys.stderr)
+        return 2
 
-    failed = 0
-    failed += run_format_test(exe, "--format=expressionjson", EXPRESSION_JSON_CASES)
-    failed += run_format_test(exe, "--format=regular", REGULAR_JSON_CASES)
-
-    protocol_checks_per_format = 4
-    total = (protocol_checks_per_format + len(EXPRESSION_JSON_CASES) +
-             protocol_checks_per_format + len(REGULAR_JSON_CASES))
-    passed = total - failed
+    arms = [("arrayjson", ARRAY_JSON_CASES), ("objectjson", OBJECT_JSON_CASES)]
+    passed = sum(run_format_test(exe, fmt, cases) for fmt, cases in arms)
+    total = sum(PROTOCOL_CHECKS_PER_FORMAT + len(cases) for _, cases in arms)
     print(f"\n{passed}/{total} tests passed.")
-    return 0 if failed == 0 else 1
+    return 0 if passed == total else 1
 
 
 if __name__ == "__main__":

@@ -48,7 +48,7 @@ EXPECTED_WHEN_ALL_FIT = {
 }
 
 
-# ── transport ────────────────────────────────────────────────────────────────
+# == transport ================================================================
 
 def _read(proc):
     length = None
@@ -168,7 +168,7 @@ def query(rows, cols=COLS):
             *[["Symbol", c] for c in cols]]
 
 
-# ── checks ───────────────────────────────────────────────────────────────────
+# == checks ===================================================================
 
 results = []
 
@@ -229,7 +229,7 @@ def main():
         n = len(fixed(fmt, q, budget=1000))
         check(f"{fmt} unaffected", n == sizes[fmt], f"{n:,} != {sizes[fmt]:,}")
 
-    # 6. Auto has no layout to choose for a non-Table, fall back to TypedColumnarJSON
+    # Auto has no layout to choose for a non-Table, fall back to TypedColumnarJSON
     print("\n5. Non-Table results fall back to TypedColumnarJSON")
     text = auto(100_000, ["Plus", ["Integer", 2], ["Integer", 3]])
     check("scalar -> typedcolumnar", identify(json.loads(text)) == "typedcolumnar", text[:60])
